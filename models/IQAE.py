@@ -240,16 +240,16 @@ class IQAE(nn.Module):
         input_hits_sum = x[:, :, :, 0].sum(dim=-1, keepdim=True) # (B, T, 1)
 
         # Identify frames with no input hits
-        no_input_hit = (input_hits_sum == 0).float()
+        #no_input_hit = (input_hits_sum == 0).float()
 
         # Penalize button hits in those frames
-        button_penalty = (button_hits * no_input_hit)
+        #button_penalty = (button_hits * no_input_hit)
 
         no_hit_mask = (button_hits == 0).float()
         velocity_penalty = (button_velocity * no_hit_mask).abs().mean()
         offset_penalty = (button_offset * no_hit_mask).abs().mean()
         
-        return h_logits, v, o, latent, button_hvo, button_penalty, velocity_penalty, offset_penalty
+        return h_logits, v, o, latent, button_hvo, velocity_penalty, offset_penalty
     
     def generate(self, input, button_hvo):
         """
