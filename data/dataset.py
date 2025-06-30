@@ -91,10 +91,7 @@ class DrumMIDIDataset(Dataset):
                 - Fixed/Flexible grid representation of the sample of shape (T, E, M)
                 - Stats of the sample
         """
-        try:
-            sample = self.data_stats[ind].get_random_segment(num_bars=self.num_bars)
-        except Exception as e:
-            return None, None
+        sample = self.data_stats[ind].get_random_segment(num_bars=self.num_bars)
 
         if self.feature_type == "fixed":
             grid, _ = sample.feature.to_fixed_grid(steps_per_quarter=self.steps_per_quarter)
@@ -116,16 +113,6 @@ class DrumMIDIDataset(Dataset):
                 - 'stats': List of stats
         """
         samples, grids = zip(*batch)
-        batch_size = len(samples)
-
-        # Filter out None values
-        samples, grids = zip(*[(s, g) for s, g in zip(samples, grids) if s is not None and g is not None])
-
-        while len(batch) != len(samples):
-            batch.extend([dataset[random.randint(0, len(dataset)-1)] for _ in range(len(batch) - len(samples))])
-            samples, grids = zip(*[(s, g) for s, g in zip(samples, grids) if s is not None and g is not None])
-        
-        # diff == 0
         T_max = max(g.shape[0] for g in grids)
         E, M = grids[0].shape[1:]
 
