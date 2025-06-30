@@ -1,7 +1,12 @@
 import os
 from symusic import Score, Note, core
 from .utils import render, get_num_bars, get_num_quarters
-import sounddevice as sd
+_HAS_SOUNDDEVICE = False
+try:
+    import sounddevice as sd
+    _HAS_SOUNDDEVICE = True
+except ImportError:
+    print("sounddevice not found, will not be able to play audio")
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -543,6 +548,9 @@ class DrumMIDIFeature:
         Args:
             fs: Sample rate for synthesis.
         """
+        if not _HAS_SOUNDDEVICE:
+            print("sounddevice not found, will not be able to play audio")
+            return
         audio_data = render(self.score, self.sf_path, fs)
         sd.play(audio_data, fs)
         sd.wait()
