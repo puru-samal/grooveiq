@@ -226,6 +226,11 @@ class IQAE_Trainer(BaseTrainer):
 
         # Final metrics
         avg_metrics = {
+            'hit_acc': running_hit_acc / running_sample_count,
+            'hit_ppv': running_hit_ppv / running_sample_count,
+            'hit_tpr': running_hit_tpr / running_sample_count,
+            'hit_f1': running_hit_f1 / running_sample_count,
+            'hit_perplexity': running_hit_perplexity / running_sample_count,
             'hit_bce': running_hit_bce / running_sample_count,
             'velocity_mse': running_velocity_mse / running_sample_count,
             'offset_mse': running_offset_mse / running_sample_count,
