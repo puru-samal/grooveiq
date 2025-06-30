@@ -205,7 +205,7 @@ class IQAE(nn.Module):
         offset_latent   = latent[:, :, :, 2]   # (B, T, num_buttons)
         hits_latent     = torch.sigmoid(hits_latent)
         hits_latent     = self.straight_through_binarize(hits_latent)
-        velocity_latent = torch.tanh(velocity_latent) + 1.0 / 2.0 # [-1.0, 1.0] -> [0, 1]
+        velocity_latent = (torch.tanh(velocity_latent) + 1.0) / 2.0 # [-1.0, 1.0] -> [0, 1]
         velocity_latent = self.velocity_quantizer(velocity_latent)
         offset_latent   = torch.tanh(offset_latent) * 0.5   # [-1.0, 1.0] -> [-0.5, 0.5]
         offset_latent   = self.offset_quantizer(offset_latent)
@@ -255,7 +255,7 @@ class IQAE(nn.Module):
 
         h_logits = output[:, :, :, 0] # (B, T, E)
         hit_mask = (torch.sigmoid(h_logits) > 0.5).int()    # (B, T, E)
-        v = (torch.tanh(output[:, :, :, 1]) + 1.0 / 2.0) * hit_mask    # (B, T, E)
+        v = ((torch.tanh(output[:, :, :, 1]) + 1.0) / 2.0) * hit_mask    # (B, T, E)
         o = torch.tanh(output[:, :, :, 2]) * 0.5 * hit_mask # (B, T, E)
         return h_logits, v, o
 
@@ -337,7 +337,7 @@ class IQAE(nn.Module):
 
         h_logits = pred[:, :, 0] # (B, E)
         h_pred = (torch.sigmoid(h_logits) > 0.5).int()    # (B, E)
-        v_pred = (torch.tanh(pred[:, :, 1]) + 1.0 / 2.0) * h_pred    # (B, E)
+        v_pred = ((torch.tanh(pred[:, :, 1]) + 1.0) / 2.0) * h_pred    # (B, E)
         o_pred = torch.tanh(pred[:, :, 2]) * 0.5 * h_pred # (B, E)
         hvo_pred = torch.stack([h_pred, v_pred, o_pred], dim=-1) # (B, E, 3)
         hvo_pred = hvo_pred.unsqueeze(1) # (B, 1, E, 3)
