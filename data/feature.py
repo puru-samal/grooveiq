@@ -641,20 +641,11 @@ class DrumMIDIFeature:
     def _grid_plot(grid: torch.Tensor, ax: Optional[plt.Axes] = None, class_names: Optional[List[str]] = None, title: str = "Grid", xlabel: str = "Time Step", ylabel: str = "Drum Class"):
         """
         Unified fixed grid visualization:
-        - Velocity shown as square color intensity (blue)
-        - Offset shown as marker direction (▲ early, ▼ late, ◼ on-time)
-        Args:
-            grid: Tensor of shape (T, E, M)
-            ax: Optional Axes object to plot on
-            class_names: Optional list of class names (e.g. ["kick", "snare" ..])
-            If None, the class names will be inferred from the grid (eg. [hit1, hit2, hit3, ...])
-            title: Title of the plot
-            xlabel: Label of the x-axis
-            ylabel: Label of the y-axis
-        Returns:
-            fig: Figure
-            ax: Axes
+        - Velocity shown as color
+        - Offset shown as marker
+        - Special marker if hit == 0 but velocity/offset nonzero
         """
+        import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches
         from matplotlib.colors import to_rgb
 
@@ -664,7 +655,7 @@ class DrumMIDIFeature:
 
         def interpolate_color(v):
             return tuple(c0[i] * (1 - v) + c1[i] * v for i in range(3))
-        
+
         T, E, M = grid.shape
 
         if class_names is None:
@@ -689,13 +680,22 @@ class DrumMIDIFeature:
         ax.set_yticklabels(class_names)
         ax.grid(True, axis='x', linestyle=':', alpha=0.3)
 
-        # Plot each hit as a patch with marker
         for e in range(E):
             for t in range(T):
-                if hits[e, t] == 0:
-                    continue
+                hit = hits[e, t]
                 velocity = velocities[e, t]
                 offset = offsets[e, t]
+
+                # Check for ghost articulation: no hit, but velocity or offset nonzero
+                is_ghost = (hit == 0) and ((velocity > 0.01) or (abs(offset) > 0.01))
+
+                if is_ghost:
+                    # Plot ghost marker: red X
+                    ax.scatter(t, e, s=100, c='red', marker='X', edgecolors='k', linewidths=0.5)
+                    continue
+
+                if hit == 0:
+                    continue
 
                 color = interpolate_color(velocity)
 
@@ -703,9 +703,9 @@ class DrumMIDIFeature:
                 if offset < -0.05:
                     marker = '<'
                 elif offset > 0.05:
-                    marker = '>'  # late
+                    marker = '>'
                 else:
-                    marker = 's'  # on time
+                    marker = 's'
 
                 ax.scatter(t, e, s=100, c=[color], marker=marker, edgecolors='k', linewidths=0.5)
 
@@ -716,10 +716,12 @@ class DrumMIDIFeature:
             plt.Line2D([0], [0], marker='<', color='w', label='Early', markerfacecolor='gray', markeredgecolor='k', markersize=8),
             plt.Line2D([0], [0], marker='>', color='w', label='Late', markerfacecolor='gray', markeredgecolor='k', markersize=8),
             plt.Line2D([0], [0], marker='s', color='w', label='On-time', markerfacecolor='gray', markeredgecolor='k', markersize=8),
+            plt.Line2D([0], [0], marker='X', color='w', label='Ghost (hit=0)', markerfacecolor='red', markeredgecolor='k', markersize=8),
         ]
         ax.legend(handles=legend, loc='upper right', title="Encoding")
-        
+
         return fig, ax
+
 
 
 

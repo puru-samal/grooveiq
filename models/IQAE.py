@@ -70,6 +70,34 @@ class DrumAxialTransformer(nn.Module):
         return x.permute(0, 2, 3, 1) # B x T x E x D
     
 
+class LearnableBinsQuantizer(nn.Module):
+    def __init__(self, num_bins, min_val=0.0, max_val=1.0):
+        super().__init__()
+        self.num_bins = num_bins
+        self.min_val = min_val
+        self.max_val = max_val
+
+        initial_bins = torch.linspace(min_val, max_val, num_bins)
+        self.bin_values = nn.Parameter(initial_bins)
+
+    def forward(self, x):
+        # Normalize x to [0, 1]
+        x_norm = (x - self.min_val) / (self.max_val - self.min_val)
+        x_norm = torch.clamp(x_norm, 0, 1)
+
+        # Distance to uniform reference bins [0, 1]
+        reference_bins = torch.linspace(0, 1, self.num_bins, device=x.device)
+        distances = torch.abs(x_norm.unsqueeze(-1) - reference_bins)
+
+        bin_idx = torch.argmin(distances, dim=-1)  # (...)
+
+        # Use learned bin values
+        bin_value = self.bin_values[bin_idx]
+
+        # Straight-through estimator
+        out = x + (bin_value - x).detach()
+        return out
+    
 
 class IQAE(nn.Module):
     """
@@ -83,7 +111,8 @@ class IQAE(nn.Module):
     def __init__(self, 
                  T=33, E=9, M=3,
                  embed_dim=128, encoder_depth=4, encoder_heads=4,
-                 decoder_depth=2, decoder_heads=4, num_buttons=2
+                 decoder_depth=2, decoder_heads=4, 
+                 num_buttons=2, num_bins_velocity=8, num_bins_offset=16
     ):
         """
         Args:
@@ -117,6 +146,7 @@ class IQAE(nn.Module):
                                 dim_heads=None, reversible=False
                         )
         
+        self.attn_proj = nn.Linear(embed_dim, 1)
         self.latent_projection = nn.Linear(embed_dim, num_buttons * M) # Pick offset from input features
 
         self.dec_inp_proj    = nn.Linear(E * M, embed_dim) # (B, T', E*M) -> (B, T', D)
@@ -130,6 +160,18 @@ class IQAE(nn.Module):
         
         self.output_projection = nn.Linear(embed_dim, E * M) # (B, T', D) -> (B, T', E*M)
 
+        # Learned bin quantizers
+        self.velocity_quantizer = LearnableBinsQuantizer(num_bins_velocity, min_val=0.0, max_val=1.0)
+        self.offset_quantizer = LearnableBinsQuantizer(num_bins_offset, min_val=-0.5, max_val=0.5)
+
+    def aggregate(self, encoded):
+        # encoded: (B, T, E, D)
+        attn_scores = self.attn_proj(encoded)  # (B, T, E, 1)
+        attn_scores = attn_scores.squeeze(-1)  # (B, T, E)
+        attn_weights = F.softmax(attn_scores, dim=-1)  # (B, T, E)
+        latent = torch.sum(encoded * attn_weights.unsqueeze(-1), dim=2)  # (B, T, D)
+        return latent
+
     def encode(self, x):
         """
         Args:
@@ -139,7 +181,7 @@ class IQAE(nn.Module):
         """
         B, T, E, M = x.shape
         encoded = self.encoder(x)               # (B, T, E, D)
-        latent = encoded.mean(dim=2)            # (B, T, D)
+        latent = self.aggregate(encoded)        # (B, T, D)
         latent = self.latent_projection(latent) # (B, T, num_buttons * M)
         latent = latent.view(B, T, self.num_buttons, M) # (B, T, num_buttons, M)
         return latent
@@ -164,7 +206,9 @@ class IQAE(nn.Module):
         hits_latent     = torch.sigmoid(hits_latent)
         hits_latent     = self.straight_through_binarize(hits_latent)
         velocity_latent = torch.sigmoid(velocity_latent)
+        velocity_latent = self.velocity_quantizer(velocity_latent)
         offset_latent   = torch.tanh(offset_latent) * 0.5
+        offset_latent   = self.offset_quantizer(offset_latent)
         button_hvo      = torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1) # (B, T, num_buttons, M)
         return button_hvo  # (B, T, num_buttons, M)
 
@@ -237,9 +281,9 @@ class IQAE(nn.Module):
         button_hits = button_hvo[:, :, :, 0] # (B, T, num_buttons)
         button_velocity = button_hvo[:, :, :, 1] # (B, T, num_buttons)
         button_offset   = button_hvo[:, :, :, 2] # (B, T, num_buttons)
-        input_hits_sum = x[:, :, :, 0].sum(dim=-1, keepdim=True) # (B, T, 1)
-
+        
         # Identify frames with no input hits
+        #input_hits_sum = x[:, :, :, 0].sum(dim=-1, keepdim=True) # (B, T, 1)
         #no_input_hit = (input_hits_sum == 0).float()
 
         # Penalize button hits in those frames
@@ -296,7 +340,7 @@ class IQAE(nn.Module):
 
 if __name__ == "__main__":
     input_size = (4, 33, 9, 3)
-    encoder = IQAE(T=33, E=9, M=3, embed_dim=128, encoder_depth=4, encoder_heads=4, decoder_depth=1, decoder_heads=2, num_buttons=2)
+    encoder = IQAE(T=33, E=9, M=3, embed_dim=128, encoder_depth=4, encoder_heads=4, decoder_depth=1, decoder_heads=2, num_buttons=3, num_bins_velocity=8, num_bins_offset=16)
     summary(encoder, input_size=input_size)
 
 
