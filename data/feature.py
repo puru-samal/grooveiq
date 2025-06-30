@@ -5,8 +5,9 @@ _HAS_SOUNDDEVICE = False
 try:
     import sounddevice as sd
     _HAS_SOUNDDEVICE = True
-except ImportError:
-    print("sounddevice not found, will not be able to play audio")
+except Exception as e:
+    print(f"Error importing sounddevice: {e}")
+    print("Will not be able to play audio")
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
