@@ -237,7 +237,8 @@ class IQAE(nn.Module):
         memory = self.dec_button_proj(button_hvo.view(B, T, num_buttons * M))  # (B, T', D)
         memory = self.pos_emb(memory) # (B, T', D)
         memory_causal_mask = CausalMask(memory) # (T', T')
-        memory_padding_mask = ~(button_hvo[:, :, :, 0].sum(dim=-1).bool()) # (B, T', 1)
+        memory_padding_mask = button_hvo[:, :, :, 0].sum(dim=-1) # (B, T')
+        memory_padding_mask = (memory_padding_mask == 0).bool()  # (B, T')
 
         decoder_out = self.decoder(
             tgt = target, 
