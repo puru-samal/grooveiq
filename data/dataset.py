@@ -91,7 +91,7 @@ class DrumMIDIDataset(Dataset):
                 - Fixed/Flexible grid representation of the sample of shape (T, E, M)
                 - Stats of the sample
         """
-        sample = self.data_stats[ind].get_random_segment(num_bars=self.num_bars)
+        sample = self.data_stats[ind]
 
         if self.feature_type == "fixed":
             grid, _ = sample.feature.to_fixed_grid(steps_per_quarter=self.steps_per_quarter)

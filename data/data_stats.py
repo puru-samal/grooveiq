@@ -11,7 +11,7 @@ from .feature import DrumMIDIFeature
 from .utils import get_num_bars
 from .drum_maps import CANONICAL_DRUM_MAP
 import torch
-
+from tqdm import tqdm
 
 @dataclass
 class SampleData:
@@ -48,6 +48,25 @@ class SampleData:
             num_bars=num_bars,
             feature=feature,
         )
+    
+    def split_segments(self, num_bars: int) -> Tuple[List["SampleData"], int]:
+        """Split the sample into segments."""
+        numerator, denominator = map(int, self.time_signature.split('/'))
+        time_signature = (numerator, denominator)
+        segments, num_errors = self.feature.split_segments(time_signature, num_bars)
+        return [
+            SampleData(
+                id=self.id,
+                map=self.map,
+                style=self.style,
+                time_signature=self.time_signature,
+                type=self.type,
+                metadata=self.metadata,
+                midi_bytes=segment.score.dumps_midi(),
+                num_bars=get_num_bars(duration=segment.end, time_signature=time_signature, tpq=segment.score.tpq),
+                feature=segment,
+            ) for segment in segments
+        ], num_errors
 
     def get_random_segment(self, num_bars: int) -> "SampleData":
         """Get a random segment of the sample."""
@@ -210,6 +229,7 @@ class DataStats:
             self.num_neg_flexible += (flexible_grid == 0).sum()
             self.num_pos_flexible += (flexible_grid == 1).sum()
         return self.num_neg_fixed, self.num_pos_fixed, self.num_neg_flexible, self.num_pos_flexible
+
 
     #### QUERYING/FILTERING #########################################################
 
@@ -381,6 +401,48 @@ class DataStats:
                     test_stats.accumulate_sample(sample)
 
         return train_stats, val_stats, test_stats
+    
+    from tqdm import tqdm
+
+    def split_segments(self, num_bars: int) -> "DataStats":
+        """Split the dataset into segments and show progress."""
+        split_stats = DataStats()
+        split_stats.set_name(f"{self.name}_{num_bars}bar")
+        num_accumulated = 0
+        num_errors = 0
+
+        pbar = tqdm(self.all_samples, desc="Splitting samples", unit="sample")
+
+        for sample in pbar:
+            try:
+                segments, sample_errors = sample.split_segments(num_bars=num_bars)
+            except Exception as e:
+                # Count as 1 error if the whole sample failed
+                num_errors += 1
+                pbar.set_postfix({
+                    "accumulated": num_accumulated,
+                    "errors": num_errors
+                })
+                continue
+
+            num_errors += sample_errors
+
+            for segment in segments:
+                try:
+                    split_stats.accumulate_sample(segment)
+                    num_accumulated += 1
+                except Exception as e:
+                    num_errors += 1
+
+            # Update progress bar postfix
+            pbar.set_postfix({
+                "accumulated": num_accumulated,
+                "errors": num_errors
+            })
+
+        pbar.close()
+        return split_stats
+
     
     #### I/O #########################################################
     

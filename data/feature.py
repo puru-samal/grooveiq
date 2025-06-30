@@ -234,6 +234,53 @@ class DrumMIDIFeature:
     # Segmentation methods
     #########################################################################################
 
+    def split_segments(self, time_signature: tuple[int, int], num_bars: int) -> Tuple[list["DrumMIDIFeature"], int]:
+        """
+        Split the score into segments using a sliding window of num_bars.
+
+        Args:
+            time_signature: Tuple (beats per bar, beat resolution denominator).
+            num_bars: Number of bars in each segment.
+
+        Returns:
+            List of DrumMIDIFeature segments.
+            Number of errors.
+        """
+        beats_per_bar = time_signature[0]
+        beat_resolution = time_signature[1]
+        ticks_per_beat = self.score.tpq * (4 / beat_resolution)
+        ticks_per_bar = int(beats_per_bar * ticks_per_beat)
+
+        if self.end == 0:  # Edge case: only one note at start
+            total_bars = 1
+        else:
+            total_bars = get_num_bars(self.end, time_signature, self.score.tpq)
+
+        total_ticks = total_bars * ticks_per_bar
+        segment_ticks = num_bars * ticks_per_bar
+
+        segments = []
+        num_errors = 0
+
+        # Start positions: 0, ticks_per_bar, ..., up to last valid start
+        for start_tick in range(0, total_ticks - segment_ticks + 1, ticks_per_bar):
+            end_tick = start_tick + segment_ticks
+
+            score_cpy = self.score.copy()
+            score_cpy.clip(start_tick, end_tick, clip_end=True, inplace=True)
+            score_cpy.shift_time(-start_tick, inplace=True)
+
+            try:
+                feature = DrumMIDIFeature.from_score(score_cpy)
+                segments.append(feature)
+            except Exception as e:
+                print(f"Error creating feature: {e}")
+                num_errors += 1
+                continue
+
+        return segments, num_errors
+
+
     def get_random_segment(self, time_signature: tuple[int, int], num_bars: int) -> "DrumMIDIFeature":
         """
         Get a random segment of the MIDI file.
