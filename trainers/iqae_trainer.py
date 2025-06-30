@@ -91,7 +91,7 @@ class IQAE_Trainer(BaseTrainer):
         batch_bar = tqdm(total=len(dataloader), dynamic_ncols=True, leave=False, position=0, desc="[Training IQAE]")
 
         # Initialize accumulators
-        running_temporal_loss = 0.0
+        #running_temporal_loss = 0.0
         running_button_penalty = 0.0
         running_velocity_penalty = 0.0
         running_offset_penalty = 0.0
@@ -136,7 +136,7 @@ class IQAE_Trainer(BaseTrainer):
                 offset_mse = (raw_offset_mse * hit_penalty).mean()
 
                 # Constraint losses
-                temporal_loss = self.temporal_loss(latent)
+                # temporal_loss = self.temporal_loss(latent)
                 # margin_loss = self.margin_loss(latent)
 
                 # Button activation penalty
@@ -145,7 +145,7 @@ class IQAE_Trainer(BaseTrainer):
                 offset_penalty = offset_penalty.abs().mean()
 
                 # Joint loss
-                joint_loss = hit_bce + velocity_mse + offset_mse + temporal_loss + button_penalty + velocity_penalty + offset_penalty
+                joint_loss = hit_bce + velocity_mse + offset_mse + button_penalty + velocity_penalty + offset_penalty
 
             # Compute hit accuracy safely
             hit_pred_int = (torch.sigmoid(h_logits) > 0.5).int()
@@ -168,7 +168,7 @@ class IQAE_Trainer(BaseTrainer):
             running_hit_bce += hit_bce.item() * batch_size
             running_velocity_mse += velocity_mse.item() * batch_size
             running_offset_mse += offset_mse.item() * batch_size
-            running_temporal_loss += temporal_loss.item() * batch_size
+            #running_temporal_loss += temporal_loss.item() * batch_size
             running_button_penalty += button_penalty.item() * batch_size
             running_velocity_penalty += velocity_penalty.item() * batch_size
             running_offset_penalty += offset_penalty.item() * batch_size
@@ -195,7 +195,7 @@ class IQAE_Trainer(BaseTrainer):
             avg_hit_perplexity = running_hit_perplexity / running_sample_count
             avg_velocity_mse = running_velocity_mse / running_sample_count
             avg_offset_mse = running_offset_mse / running_sample_count
-            avg_temporal_loss = running_temporal_loss / running_sample_count
+            #avg_temporal_loss = running_temporal_loss / running_sample_count
             avg_button_penalty = running_button_penalty / running_sample_count
             avg_velocity_penalty = running_velocity_penalty / running_sample_count
             avg_offset_penalty = running_offset_penalty / running_sample_count
@@ -214,7 +214,7 @@ class IQAE_Trainer(BaseTrainer):
                 h_perplexity=f"{avg_hit_perplexity:.4f}",
                 v_mse=f"{avg_velocity_mse:.4f}",
                 o_mse=f"{avg_offset_mse:.4f}",
-                temporal=f"{avg_temporal_loss:.4f}",
+                #temporal=f"{avg_temporal_loss:.4f}",
                 button_penalty=f"{avg_button_penalty:.4f}",
                 velocity_penalty=f"{avg_velocity_penalty:.4f}",
                 offset_penalty=f"{avg_offset_penalty:.4f}",
@@ -247,7 +247,7 @@ class IQAE_Trainer(BaseTrainer):
             'hit_bce': running_hit_bce / running_sample_count,
             'velocity_mse': running_velocity_mse / running_sample_count,
             'offset_mse': running_offset_mse / running_sample_count,
-            'temporal_loss': running_temporal_loss / running_sample_count,
+            #'temporal_loss': running_temporal_loss / running_sample_count,
             'button_penalty': running_button_penalty / running_sample_count,
             'velocity_penalty': running_velocity_penalty / running_sample_count,
             'offset_penalty': running_offset_penalty / running_sample_count,
