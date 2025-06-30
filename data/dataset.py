@@ -59,15 +59,6 @@ class DrumMIDIDataset(Dataset):
 
         print(f"Skipped {num_errors} samples due to errors.")
         print(f"Loaded and processed {len(pickle_data)} samples.\n")
-        self.data_stats.get_pos_neg_counts(steps_per_quarter=self.steps_per_quarter)
-        if self.feature_type == "fixed":
-            print(f"Number of negative samples in fixed grid: {self.data_stats.num_neg_fixed}")
-            print(f"Number of positive samples in fixed grid: {self.data_stats.num_pos_fixed}")
-            print(f"pos_weight: {self.data_stats.num_neg_fixed / self.data_stats.num_pos_fixed}")
-        elif self.feature_type == "flexible":
-            print(f"Number of negative samples in flexible grid: {self.data_stats.num_neg_flexible}")
-            print(f"Number of positive samples in flexible grid: {self.data_stats.num_pos_flexible}")
-            print(f"pos_weight: {self.data_stats.num_neg_flexible / self.data_stats.num_pos_flexible}")
 
         if verbose: 
             self.data_stats.summarize(verbose=False)

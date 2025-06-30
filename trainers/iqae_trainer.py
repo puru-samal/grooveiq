@@ -57,7 +57,8 @@ class IQAE_Trainer(BaseTrainer):
         super().__init__(model, config, run_name, config_file, device)
         
         #  Initialize Hit loss
-        self.hit_loss = nn.BCEWithLogitsLoss(reduction='none', pos_weight=torch.tensor(17.0))
+        self.pos_weight = config['loss'].get('pos_weight', 17.0)
+        self.hit_loss = nn.BCEWithLogitsLoss(reduction='none', pos_weight=torch.tensor(self.pos_weight))
 
         #  Initialize Velocity loss
         self.velocity_loss = nn.MSELoss(reduction='none')
@@ -70,7 +71,7 @@ class IQAE_Trainer(BaseTrainer):
         self.margin_loss = lambda x: ConstraintLosses().margin_loss(x)
 
         # Hit penalty
-        self.hit_penalty = config.get('hit_penalty', 1.0)
+        self.hit_penalty = config['loss'].get('hit_penalty', 1.0)
 
     def set_optimizer(self, optimizer) -> None:
         self.optimizer = optimizer
