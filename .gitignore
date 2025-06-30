@@ -1,0 +1,46 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+
+# macOS system files
+.DS_Store
+
+# Virtual environment
+venv/
+.env/
+.venv/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Editor/IDE files
+*.swp
+*~
+.vscode/
+.idea/
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Test cache
+.pytest_cache/
+.cache/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Raw data and data pieces 
+dataset/raw/
+dataset/serialized/2barGMD.pkl
+dataset/serialized/50sAutumn.pkl
+dataset/serialized/60sEarly.pkl
+dataset/serialized/70sOpen.pkl
+dataset/serialized/80sBlack.pkl
+dataset/serialized/ebonyVintage.pkl
+dataset/serialized/sessionStudio.pkl
+dataset/serialized/sparkleModern.pkl
+dataset/serialized/toontrack.pkl
