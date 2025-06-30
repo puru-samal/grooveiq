@@ -118,9 +118,7 @@ class IQAE_Trainer(BaseTrainer):
             h_true, v_true, o_true = grids[:, :, :, 0], grids[:, :, :, 1], grids[:, :, :, 2]
 
             with torch.autocast(device_type=self.device, dtype=torch.float16):
-                h_logits, v_pred, o_pred, latent, dbg_dict = self.model(grids)
-                button_hvo = dbg_dict['button_hvo']
-                change_mask = dbg_dict['change_mask']
+                h_logits, v_pred, o_pred, latent, button_hvo = self.model(grids)
 
                 hit_penalty = torch.where(h_true == 1, 10.0, 0.0)
 
@@ -136,11 +134,11 @@ class IQAE_Trainer(BaseTrainer):
                 offset_mse = (raw_offset_mse * hit_penalty).mean()
 
                 # Constraint losses
-                # temporal_loss = self.temporal_loss(latent)
+                temporal_loss = self.temporal_loss(latent)
                 # margin_loss = self.margin_loss(latent)
 
                 # Joint loss
-                joint_loss = hit_bce + velocity_mse + offset_mse #+ temporal_loss #+ margin_loss
+                joint_loss = hit_bce + velocity_mse + offset_mse + temporal_loss #+ margin_loss
 
             # Compute hit accuracy safely
             hit_pred_int = (torch.sigmoid(h_logits) > 0.5).int()
@@ -163,7 +161,7 @@ class IQAE_Trainer(BaseTrainer):
             running_hit_bce += hit_bce.item() * batch_size
             running_velocity_mse += velocity_mse.item() * batch_size
             running_offset_mse += offset_mse.item() * batch_size
-            #running_temporal_loss += temporal_loss.item() * batch_size
+            running_temporal_loss += temporal_loss.item() * batch_size
             #running_margin_loss += margin_loss.item() * batch_size
             running_joint_loss += joint_loss.item() * batch_size
             running_hit_acc += hit_acc * batch_size
@@ -237,10 +235,10 @@ class IQAE_Trainer(BaseTrainer):
         }
 
         # Plotting
+        print(f"button_hvo: {button_hvo[0, :, :, 0]}")
         to_plots = {
             'samples': samples,         # List of SampleData objects
             'button_hvo': button_hvo,   # Button HVO corresponding to samples  (B, T, num_buttons, M)
-            'change_mask': change_mask, # Change mask corresponding to samples (B, T)
         }
 
         return avg_metrics, to_plots
@@ -349,7 +347,6 @@ class IQAE_Trainer(BaseTrainer):
         if max_length is None:
             max_length = self.model.T
 
-        print(f"max_length: {max_length}")
         # Initialize variables
         self.model.eval()
         batch_bar = tqdm(total=len(dataloader), dynamic_ncols=True, leave=False, position=0, desc=f"[Generating]")
@@ -366,18 +363,17 @@ class IQAE_Trainer(BaseTrainer):
                 latent = self.model.encode(grids)
 
                 # Get button HVO
-                button_hvo, change_mask = self.model.make_button_hvo(grids, latent)
+                button_hvo = self.model.make_button_hvo(latent)
 
                 # Generate
                 generated_grids = self.model.sos_token.repeat(grids.size(0), 1, 1, 1) # (B, 1, E, M)  # Learned SOS token
                 for t in range(max_length):
                     b = button_hvo[:, :t+1, :, :]
-                    c = change_mask[:, :t+1]
-                    hvo_pred = self.model.generate(generated_grids, b, c) # (B, 1, E, 3)
+                    hvo_pred = self.model.generate(generated_grids, b) # (B, 1, E, 3)
                     generated_grids = torch.cat([generated_grids, hvo_pred], dim=1) # (B, T'+1, E, 3)
 
                 # Clean up
-                #del grids, latent, button_hvo, change_mask
+                #del grids, latent, button_hvo
                 torch.cuda.empty_cache()
 
                 # TODO: Post process sequences
@@ -462,7 +458,6 @@ class IQAE_Trainer(BaseTrainer):
             train_plots: Dictionary containing training plots
                 - samples: List of SampleData objects
                 - button_hvo: Button HVO corresponding to samples (B, T, num_buttons, M)
-                - change_mask: Change mask corresponding to samples (B, T)
             val_results: Dictionary containing validation results
                 - generated_sample: List of SampleData objects
                 - generated_grid: (B, T, E, M)
@@ -474,8 +469,8 @@ class IQAE_Trainer(BaseTrainer):
         plots_dir = self.expt_root / 'plots'
         plots_dir.mkdir(exist_ok=True)
 
-        # TODO: Plot Training Grid Plot + Button HVO + Change Mask
-        fig1, axes1 = plt.subplots(min(num_samples, len(train_plots['samples'])), 3, figsize=(15, 5*min(num_samples, len(train_plots['samples']))))
+        # TODO: Plot Training Grid Plot + Button HVO
+        fig1, axes1 = plt.subplots(min(num_samples, len(train_plots['samples'])), 2, figsize=(15, 5*min(num_samples, len(train_plots['samples']))))
         fig2, axes2 = plt.subplots(min(num_samples, len(val_results)), 2, figsize=(15, 5*min(num_samples, len(val_results))))
 
         for i in range(min(num_samples, len(train_plots['samples']))):
@@ -490,19 +485,6 @@ class IQAE_Trainer(BaseTrainer):
                 train_plots['button_hvo'][i, :, :, :].cpu().detach(),
                 ax=axes1[i, 1],
                 title="Button HVO",
-                xlabel="Time Step",
-                ylabel="Drum Class"
-            )
-
-            # Change mask
-            change_mask = train_plots['change_mask'][i, :].unsqueeze(1).unsqueeze(2).expand(-1, -1, 3).clone()
-            change_mask[:, :, 1] = 1.0  # Velocity
-            change_mask[:, :, 2] = 0.0  # Offset
-
-            DrumMIDIFeature._grid_plot(
-                change_mask.cpu().detach(),
-                ax=axes1[i, 2],
-                title="Change Mask",
                 xlabel="Time Step",
                 ylabel="Drum Class"
             )

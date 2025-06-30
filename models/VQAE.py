@@ -70,8 +70,7 @@ class DrumAxialTransformer(nn.Module):
         return x.permute(0, 2, 3, 1) # B x T x E x D
     
 
-
-class IQAE(nn.Module):
+class VQAE(nn.Module):
     """
     ### Input shape:
         x: Tensor of shape (B, T, E, M)
@@ -117,10 +116,11 @@ class IQAE(nn.Module):
                                 dim_heads=None, reversible=False
                         )
         
-        self.latent_projection = nn.Linear(embed_dim, num_buttons * M) # Pick offset from input features
+        self.pre_vq_proj = nn.Linear(embed_dim, embed_dim)
+        self.hit_quantizer = VectorQuantize(dim = embed_dim, codebook_size=num_buttons, codebook_dim=embed_dim, decay=0.1, eps=1e-5)
 
         self.dec_inp_proj    = nn.Linear(E * M, embed_dim) # (B, T', E*M) -> (B, T', D)
-        self.dec_button_proj = nn.Linear(num_buttons * M, embed_dim) # (B, T', num_buttons*M) -> (B, T', D)
+        self.dec_latent_proj = nn.Linear(embed_dim, embed_dim)
         
         self.decoder = nn.TransformerDecoder(
             decoder_layer = nn.TransformerDecoderLayer(d_model=embed_dim, nhead=decoder_heads, batch_first=True, norm_first=True),
@@ -135,41 +135,26 @@ class IQAE(nn.Module):
         Args:
             x: Tensor of shape (B, T, E, M)
         Returns:
-            latent: Tensor of shape (B, T, num_buttons, M)
+            z: Tensor of shape (B, T, D)
         """
-        B, T, E, M = x.shape
-        encoded = self.encoder(x)               # (B, T, E, D)
-        latent = encoded.mean(dim=2)            # (B, T, D)
-        latent = self.latent_projection(latent) # (B, T, num_buttons * M)
-        latent = latent.view(B, T, self.num_buttons, M) # (B, T, num_buttons, M)
-        return latent
-    
-    def straight_through_binarize(self, x, threshold=0.5):
-        """Applies hard threshold during forward, identity gradient during backward."""
-        hard = (x > threshold).float()
-        return x + (hard - x).detach()
+        encoded = self.encoder(x)           # (B, T, E, D)
+        z = encoded.mean(dim=2)             # (B, T, D)
+        z = self.pre_vq_proj(z)             # (B, T, D)
+        return z
     
 
-    def make_button_hvo(self, latent):
+    def quantize(self, hits_latent):
         """
         Args:
-            latent: Tensor of shape (B, T, num_buttons, M)
+            hits_latent: Tensor of shape (B, T)
         Returns:
-            button_hvo: (B, T, num_buttons, M) — [activation_flag, velocity, offset]
+            Tensor of shape (B, T, 1)
         """
-        # Get hits and velocity from latent
-        hits_latent = latent[:, :, :, 0]       # (B, T, num_buttons)
-        velocity_latent = latent[:, :, :, 1]   # (B, T, num_buttons)
-        offset_latent   = latent[:, :, :, 2]   # (B, T, num_buttons)
-        hits_latent     = torch.sigmoid(hits_latent)
-        hits_latent     = self.straight_through_binarize(hits_latent)
-        velocity_latent = torch.sigmoid(velocity_latent)
-        offset_latent   = torch.tanh(offset_latent) * 0.5
-        button_hvo      = torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1) # (B, T, num_buttons, M)
-        return button_hvo  # (B, T, num_buttons, M)
+        quantized, indices, commit_loss = self.hit_quantizer(hits_latent)
+        return quantized, indices, commit_loss
+    
 
-
-    def decode(self, input, button_hvo):
+    def decode(self, input, quantized):
         """
         Args:
             input: Tensor of shape  (B, T, E, M)
@@ -181,16 +166,14 @@ class IQAE(nn.Module):
             o: Tensor of shape (B, T, E)
         """
         B, T, E, M = input.shape
-        num_buttons = self.num_buttons
         
         # Fix device issue: ensure sos_token is on same device as input
         target = torch.cat([self.sos_token.unsqueeze(0).repeat(B, 1, 1, 1), input[:, :-1, :, :]], dim=1) # (B, T', E, M)
         target = self.dec_inp_proj(target.view(B, T, E * M)) # (B, T', D)
-        
         target = self.pos_emb(target) # (B, T', D)
         target_causal_mask = CausalMask(target) # (T', T')
         
-        memory = self.dec_button_proj(button_hvo.view(B, T, num_buttons * M))  # (B, T', D)
+        memory = self.dec_latent_proj(quantized)  # (B, T', D)
         memory = self.pos_emb(memory) # (B, T', D)
         memory_causal_mask = CausalMask(memory) # (T', T')
 
@@ -228,14 +211,19 @@ class IQAE(nn.Module):
         # ========== ENCODING ==========
         latent = self.encode(x)             # (B, T, M-1)
 
-        # ========== MAKE BUTTON HVO ==========
-        button_hvo = self.make_button_hvo(latent) # (B, T, num_buttons, M)
+        # ========== VECTOR QUANTIZATION ==========
+        quantized, indices, commit_loss = self.quantize(latent) # (B, T, D), (B, T), (B, T)
 
         # ========== DECODING ==========
-        h_logits, v, o = self.decode(x, button_hvo) # (B, T, E), (B, T, E), (B, T, E)
-        return h_logits, v, o, latent, button_hvo
+        h_logits, v, o = self.decode(x, quantized) # (B, T, E), (B, T, E), (B, T, E)
+        
+        return h_logits, v, o, quantized, {
+            "quantized": quantized,
+            "indices": indices,
+            "commit_loss": commit_loss,
+        }
     
-    def generate(self, input, button_hvo):
+    def generate(self, input, button_hvo, change_mask):
         """
         Generate a prediction for the input at time t, given input < t, button HVO <= t, and change mask <= t.
         Args:
@@ -254,12 +242,14 @@ class IQAE(nn.Module):
         memory = self.dec_button_proj(button_hvo.view(B, T, num_buttons * M))  # (B, T', D)
         memory = self.pos_emb(memory) # (B, T', D)
         memory_causal_mask = CausalMask(memory) # (T', T')
+        memory_change_mask = ~change_mask # (B, T')
 
         decoder_out = self.decoder(
             tgt = target, 
             memory = memory,
             tgt_mask = target_causal_mask,
             memory_mask = memory_causal_mask,
+            memory_key_padding_mask = memory_change_mask,
             tgt_is_causal = True,
             memory_is_causal = True
         ) # (B, T', D)
@@ -280,7 +270,7 @@ class IQAE(nn.Module):
 
 if __name__ == "__main__":
     input_size = (4, 33, 9, 3)
-    encoder = IQAE(T=33, E=9, M=3, embed_dim=128, encoder_depth=4, encoder_heads=4, decoder_depth=1, decoder_heads=2, num_buttons=2)
+    encoder = VQAE(T=33, E=9, M=3, embed_dim=128, encoder_depth=4, encoder_heads=4, decoder_depth=1, decoder_heads=2, num_buttons=2)
     summary(encoder, input_size=input_size)
 
 
