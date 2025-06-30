@@ -205,9 +205,9 @@ class IQAE(nn.Module):
         offset_latent   = latent[:, :, :, 2]   # (B, T, num_buttons)
         hits_latent     = torch.sigmoid(hits_latent)
         hits_latent     = self.straight_through_binarize(hits_latent)
-        velocity_latent = torch.sigmoid(velocity_latent)
+        velocity_latent = torch.tanh(velocity_latent) + 1.0 / 2.0 # [-1.0, 1.0] -> [0, 1]
         velocity_latent = self.velocity_quantizer(velocity_latent)
-        offset_latent   = torch.tanh(offset_latent) * 0.5
+        offset_latent   = torch.tanh(offset_latent) * 0.5   # [-1.0, 1.0] -> [-0.5, 0.5]
         offset_latent   = self.offset_quantizer(offset_latent)
         button_hvo      = torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1) # (B, T, num_buttons, M)
         return button_hvo  # (B, T, num_buttons, M)
@@ -237,12 +237,14 @@ class IQAE(nn.Module):
         memory = self.dec_button_proj(button_hvo.view(B, T, num_buttons * M))  # (B, T', D)
         memory = self.pos_emb(memory) # (B, T', D)
         memory_causal_mask = CausalMask(memory) # (T', T')
+        memory_padding_mask = ~(button_hvo[:, :, :, 0].sum(dim=-1).bool()) # (B, T', 1)
 
         decoder_out = self.decoder(
             tgt = target, 
             memory = memory,
             tgt_mask = target_causal_mask,
             memory_mask = memory_causal_mask,
+            memory_key_padding_mask = memory_padding_mask,
             tgt_is_causal = True,
             memory_is_causal = True
         ) # (B, T', D)
@@ -252,7 +254,7 @@ class IQAE(nn.Module):
 
         h_logits = output[:, :, :, 0] # (B, T, E)
         hit_mask = (torch.sigmoid(h_logits) > 0.5).int()    # (B, T, E)
-        v = torch.sigmoid(output[:, :, :, 1]) * hit_mask    # (B, T, E)
+        v = (torch.tanh(output[:, :, :, 1]) + 1.0 / 2.0) * hit_mask    # (B, T, E)
         o = torch.tanh(output[:, :, :, 2]) * 0.5 * hit_mask # (B, T, E)
         return h_logits, v, o
 
@@ -314,12 +316,14 @@ class IQAE(nn.Module):
         memory = self.dec_button_proj(button_hvo.view(B, T, num_buttons * M))  # (B, T', D)
         memory = self.pos_emb(memory) # (B, T', D)
         memory_causal_mask = CausalMask(memory) # (T', T')
+        memory_padding_mask = ~(button_hvo[:, :, :, 0].sum(dim=-1).bool()) # (B, T')
 
         decoder_out = self.decoder(
             tgt = target, 
             memory = memory,
             tgt_mask = target_causal_mask,
             memory_mask = memory_causal_mask,
+            memory_key_padding_mask = memory_padding_mask,
             tgt_is_causal = True,
             memory_is_causal = True
         ) # (B, T', D)
@@ -331,7 +335,7 @@ class IQAE(nn.Module):
 
         h_logits = pred[:, :, 0] # (B, E)
         h_pred = (torch.sigmoid(h_logits) > 0.5).int()    # (B, E)
-        v_pred = torch.sigmoid(pred[:, :, 1]) * h_pred    # (B, E)
+        v_pred = (torch.tanh(pred[:, :, 1]) + 1.0 / 2.0) * h_pred    # (B, E)
         o_pred = torch.tanh(pred[:, :, 2]) * 0.5 * h_pred # (B, E)
         hvo_pred = torch.stack([h_pred, v_pred, o_pred], dim=-1) # (B, E, 3)
         hvo_pred = hvo_pred.unsqueeze(1) # (B, 1, E, 3)
