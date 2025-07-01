@@ -1,0 +1,126 @@
+
+name : "Puru"
+expt : "Test"
+
+###### Dataset -----------------------------------------------------------------
+data:
+    train_path: "dataset/serialized/merged_ts=4-4_2bar_tr0.80-va0.10-te0.10_train.pkl"
+    val_path: "dataset/serialized/merged_ts=4-4_2bar_tr0.80-va0.10-te0.10_val.pkl"
+    test_path: "dataset/serialized/merged_ts=4-4_2bar_tr0.80-va0.10-te0.10_test.pkl"
+    num_bars: 2
+    feature_type: "fixed"  # [fixed, flexible]
+    steps_per_quarter: 4
+    subset: 0.01            # Fraction of the dataset to load
+    num_workers: 0         # Number of workers for data loading
+    batch_size: 16         # Batch size
+
+###### Network Specs -------------------------------------------------------------
+model:
+    embed_dim: 32
+    encoder_type: "axial" # [conv, temporal, spatial, mlp, axial]
+    encoder_depth: 1
+    encoder_heads: 1
+    decoder_type: "transformer" # [transformer, gru, mlp, conv]
+    decoder_depth: 1
+    decoder_heads: 1
+    num_buttons:   3
+    num_bins_velocity: 8
+    num_bins_offset:  16
+
+###### Common Training Parameters ------------------------------------------------
+training:
+  config_file                 : "_configs/config_test.yaml"
+  use_wandb                   : False   # Toggle wandb logging
+  wandb_run_id                : "none" # "none" or "run_id"
+  resume                      : True   # Resume an existing run (run_id != 'none')
+  gradient_accumulation_steps : 1
+  wandb_project               : "Set-Project-Name-Here" # wandb project to log to
+
+###### Loss ----------------------------------------------------------------------
+loss:
+  pos_weight                  : 21.0 # Positive weight for hit loss (21 for train set)
+  hit_penalty                 : 21.0 # Hit penalty for hit loss (2 for train set)
+
+###### Optimizer -----------------------------------------------------------------
+optimizer:
+  name: "adamw" # Options: sgd, adam, adamw
+  lr: 0.0004    # Base learning rate
+
+  # Common parameters
+  weight_decay: 0.000001
+
+  # Parameter groups
+  # You can add more param groups as you want and set their learning rates and patterns
+  param_groups:
+    - name: self_attn
+      patterns: []  # Will match all parameters containing "encoder"
+      lr: 0.0002    # LR for self_attn
+      layer_decay:
+        enabled: False
+        decay_rate: 0.8
+
+    - name: ffn
+      patterns: []
+      lr: 0.0002  # LR for ffn
+      layer_decay:
+        enabled: False
+        decay_rate: 0.8
+
+  # Layer-wise learning rates
+  layer_decay:
+    enabled: False
+    decay_rate: 0.75
+
+  # SGD specific parameters
+  sgd:
+    momentum: 0.9
+    nesterov: True
+    dampening: 0
+
+  # Adam specific parameters
+  adam:
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    amsgrad: False
+
+  # AdamW specific parameters
+  adamw:
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    amsgrad: False
+
+###### Scheduler -----------------------------------------------------------------
+scheduler:
+  name: "cosine"  # Options: reduce_lr, cosine, cosine_warm
+
+  # ReduceLROnPlateau specific parameters
+  reduce_lr:
+    mode: "min"  # Options: min, max
+    factor: 0.1  # Factor to reduce learning rate by
+    patience: 10  # Number of epochs with no improvement after which LR will be reduced
+    threshold: 0.0001  # Threshold for measuring the new optimum
+    threshold_mode: "rel"  # Options: rel, abs
+    cooldown: 0  # Number of epochs to wait before resuming normal operation
+    min_lr: 0.0000001  # Minimum learning rate
+    eps: 1e-8  # Minimal decay applied to lr
+
+  # CosineAnnealingLR specific parameters
+  cosine:
+    T_max: 15  # Maximum number of iterations
+    eta_min: 0.0000001  # Minimum learning rate
+    last_epoch: -1
+
+  # CosineAnnealingWarmRestarts specific parameters
+  cosine_warm:
+    T_0: 10    # Number of iterations for the first restart
+    T_mult: 10 # Factor increasing T_i after each restart
+    eta_min: 0.0000001  # Minimum learning rate
+    last_epoch: -1
+
+  # Warmup parameters (can be used with any scheduler)
+  warmup:
+    enabled: True
+    type: "exponential"  # Options: linear, exponential
+    epochs: 5
+    start_factor: 0.1
+    end_factor: 1.0
