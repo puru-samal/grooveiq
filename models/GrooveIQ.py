@@ -205,8 +205,8 @@ class GrooveIQ(nn.Module):
             if self.decoder.decoder_type == "transformer":
                 tgt_embed_pos = self.pos_emb(tgt_embed)
                 mem_embed_pos = self.pos_emb(mem_embed)
-                tgt_mask = torch.triu(torch.ones(t + 1, t + 1, device=button_hvo.device), diagonal=1).bool()
-                mem_mask = torch.triu(torch.ones(t + 1, t + 1, device=button_hvo.device), diagonal=1).bool()
+                tgt_mask = CausalMask(tgt_embed_pos)
+                mem_mask = CausalMask(mem_embed_pos)
                 mem_pad_mask = (button_hvo[:, :t + 1, :, 0].sum(dim=-1) == 0).bool()
                 dec_out = self.decoder(
                     tgt_embed_pos, mem_embed_pos, tgt_mask=tgt_mask, memory_mask=mem_mask, memory_key_padding_mask=mem_pad_mask
