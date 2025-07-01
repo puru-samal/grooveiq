@@ -383,7 +383,6 @@ class IQAE_Trainer(BaseTrainer):
             for i, batch in enumerate(dataloader):
                 # Get data
                 grids, samples = batch['grid'].to(self.device), batch['samples']
-                h_true, v_true, o_true = grids[:, :, :, 0], grids[:, :, :, 1], grids[:, :, :, 2]
                 
                 # Get latent
                 latent = self.model.encode(grids)
@@ -392,11 +391,7 @@ class IQAE_Trainer(BaseTrainer):
                 button_hvo = self.model.make_button_hvo(latent)
 
                 # Generate
-                generated_grids = self.model.sos_token.repeat(grids.size(0), 1, 1, 1) # (B, 1, E, M)  # Learned SOS token
-                for t in range(max_length):
-                    b = button_hvo[:, :t+1, :, :]
-                    hvo_pred = self.model.generate(generated_grids, b) # (B, 1, E, 3)
-                    generated_grids = torch.cat([generated_grids, hvo_pred], dim=1) # (B, T'+1, E, 3)
+                generated_grids = self.model.generate(button_hvo, max_steps=max_length)
 
                 # Clean up
                 #del grids, latent, button_hvo

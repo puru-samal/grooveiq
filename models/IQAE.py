@@ -110,6 +110,7 @@ class IQAE(nn.Module):
     """
     def __init__(self, 
                  T=33, E=9, M=3,
+                 #z_dim=64,
                  embed_dim=128, encoder_depth=4, encoder_heads=4,
                  decoder_depth=2, decoder_heads=4, 
                  num_buttons=2, num_bins_velocity=8, num_bins_offset=16
@@ -146,6 +147,8 @@ class IQAE(nn.Module):
                                 dim_heads=None, reversible=False
                         )
         
+        #self.z_mu_proj = nn.Linear(embed_dim, z_dim)
+        #self.z_logvar_proj = nn.Linear(embed_dim, z_dim)
         self.attn_proj = nn.Linear(embed_dim, 1)
         self.latent_projection = nn.Linear(embed_dim, num_buttons * M) # Pick offset from input features
 
@@ -183,8 +186,17 @@ class IQAE(nn.Module):
         encoded = self.encoder(x)               # (B, T, E, D)
         latent = self.aggregate(encoded)        # (B, T, D)
         latent = self.latent_projection(latent) # (B, T, num_buttons * M)
-        latent = latent.view(B, T, self.num_buttons, M) # (B, T, num_buttons, M)
-        return latent
+
+        # z
+        #mu = self.z_mu_proj(latent.mean(dim=1))          # (B, z_dim)
+        #logvar = self.z_logvar_proj(latent.mean(dim=1))  # (B, z_dim)
+        #std = torch.exp(0.5 * logvar)
+        #eps = torch.randn_like(std)
+        #z = mu + eps * std  # Reparameterization # (B, z_dim)
+        #kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean() # (B)
+
+        button_latent = latent.view(B, T, self.num_buttons, M) # (B, T, num_buttons, M)
+        return button_latent
     
     def straight_through_binarize(self, x, threshold=0.5):
         """Applies hard threshold during forward, identity gradient during backward."""
@@ -192,7 +204,7 @@ class IQAE(nn.Module):
         return x + (hard - x).detach()
     
 
-    def make_button_hvo(self, latent):
+    def make_button_hvo(self, button_latent):
         """
         Args:
             latent: Tensor of shape (B, T, num_buttons, M)
@@ -200,9 +212,9 @@ class IQAE(nn.Module):
             button_hvo: (B, T, num_buttons, M) — [activation_flag, velocity, offset]
         """
         # Get hits and velocity from latent
-        hits_latent = latent[:, :, :, 0]       # (B, T, num_buttons)
-        velocity_latent = latent[:, :, :, 1]   # (B, T, num_buttons)
-        offset_latent   = latent[:, :, :, 2]   # (B, T, num_buttons)
+        hits_latent = button_latent[:, :, :, 0]       # (B, T, num_buttons)
+        velocity_latent = button_latent[:, :, :, 1]   # (B, T, num_buttons)
+        offset_latent   = button_latent[:, :, :, 2]   # (B, T, num_buttons)
         hits_latent     = torch.sigmoid(hits_latent)
         hits_latent     = self.straight_through_binarize(hits_latent)
         velocity_latent = (torch.tanh(velocity_latent) + 1.0) / 2.0 # [-1.0, 1.0] -> [0, 1]
@@ -258,6 +270,12 @@ class IQAE(nn.Module):
         v = ((torch.tanh(output[:, :, :, 1]) + 1.0) / 2.0) * hit_mask    # (B, T, E)
         o = torch.tanh(output[:, :, :, 2]) * 0.5 * hit_mask # (B, T, E)
         return h_logits, v, o
+    
+    def sample_z(self, batch_size, device):
+        """
+        Sample z from standard normal prior
+        """
+        return torch.randn(batch_size, self.z_dim, device=device)
 
     def forward(self, x):
         """
@@ -298,51 +316,49 @@ class IQAE(nn.Module):
         
         return h_logits, v, o, latent, button_hvo, velocity_penalty, offset_penalty
     
-    def generate(self, input, button_hvo):
+    def generate(self, button_hvo, max_steps=None):
         """
         Generate a prediction for the input at time t, given input < t, button HVO <= t, and change mask <= t.
         Args:
-            input: Tensor of shape (B, T, E, M)
             button_hvo: Tensor of shape (B, T, num_buttons, M)
-            change_mask: Tensor of shape (B, T)
+            max_steps: int (optional)
         Returns:
-            hvo_pred: Tensor of shape (B, 1, E, 3)
+            hvo_pred: Tensor of shape (B, T, E, 3)
         """
-        B, T, E, M = input.shape
-        num_buttons = button_hvo.shape[2]
-        target = self.dec_inp_proj(input.view(B, T, E * M)) # (B, T', D)
-        target = self.pos_emb(target) # (B, T', D)
-        target_causal_mask = CausalMask(target) # (T', T')
-        
-        memory = self.dec_button_proj(button_hvo.view(B, T, num_buttons * M))  # (B, T', D)
-        memory = self.pos_emb(memory) # (B, T', D)
-        memory_causal_mask = CausalMask(memory) # (T', T')
-        memory_padding_mask = button_hvo[:, :, :, 0].sum(dim=-1) # (B, T')
-        memory_padding_mask = (memory_padding_mask == 0).bool() # (B, T')
+        B, T, num_buttons, M = button_hvo.shape
+        E = self.E
+        T_gen = max_steps or T # (B, T, num_buttons, M)
 
-        decoder_out = self.decoder(
-            tgt = target, 
-            memory = memory,
-            tgt_mask = target_causal_mask,
-            memory_mask = memory_causal_mask,
-            memory_key_padding_mask = memory_padding_mask,
-            tgt_is_causal = True,
-            memory_is_causal = True
-        ) # (B, T', D)
+        generated = self.sos_token.unsqueeze(0).repeat(B, 1, 1, 1) # (B, 1, E, M)
+        for t in range(T_gen):
+            tgt_embed = self.dec_inp_proj(generated.view(B, t + 1, E * M)) # (B, T, D)
+            mem_embed = self.dec_button_proj(button_hvo[:, :t + 1].view(B, t + 1, num_buttons * M)) # (B, T, D)
 
-        output = self.output_projection(decoder_out) # (B, T', E*M)
-        output = output.view(B, T, E, M) # (B, T', E*M) -> (B, T', E, M)
+            tgt_embed_pos = self.pos_emb(tgt_embed)
+            mem_embed_pos = self.pos_emb(mem_embed)
+            tgt_mask = CausalMask(tgt_embed_pos)
+            mem_mask = CausalMask(mem_embed_pos)
+            mem_pad_mask = (button_hvo[:, :t + 1, :, 0].sum(dim=-1) == 0).bool()
+            dec_out = self.decoder(
+                tgt = tgt_embed_pos, 
+                memory = mem_embed_pos, 
+                tgt_mask = tgt_mask, 
+                memory_mask = mem_mask, 
+                memory_key_padding_mask = mem_pad_mask,
+                tgt_is_causal = True,   
+                memory_is_causal = True
+            ) # (B, t + 1, D)
+            output = self.output_projection(dec_out) # (B, t + 1, E * M)
+            output = output.view(B, t + 1, E, M)     # (B, t + 1, E, M)
+            pred_step = output[:, -1, :, :]          # (B, E, M)
+            h_logits = pred_step[:, :, 0]            # (B, E)
+            h_pred = (torch.sigmoid(h_logits) > 0.5).int() # (B, E)
+            v_pred = ((torch.tanh(pred_step[:, :, 1]) + 1.0) / 2.0) * h_pred # (B, E)
+            o_pred = torch.tanh(pred_step[:, :, 2]) * 0.5 * h_pred   # (B, E)
+            hvo_pred = torch.stack([h_pred, v_pred, o_pred], dim=-1) # (B, E, 3)
+            generated = torch.cat([generated, hvo_pred.unsqueeze(1)], dim=1) # (B, t + 1, E, M)
 
-        pred = output[:, -1, :, :] # (B, E, M)
-
-        h_logits = pred[:, :, 0] # (B, E)
-        h_pred = (torch.sigmoid(h_logits) > 0.5).int()    # (B, E)
-        v_pred = ((torch.tanh(pred[:, :, 1]) + 1.0) / 2.0) * h_pred    # (B, E)
-        o_pred = torch.tanh(pred[:, :, 2]) * 0.5 * h_pred # (B, E)
-        hvo_pred = torch.stack([h_pred, v_pred, o_pred], dim=-1) # (B, E, 3)
-        hvo_pred = hvo_pred.unsqueeze(1) # (B, 1, E, 3)
-        return hvo_pred
-
+        return generated
 
 if __name__ == "__main__":
     input_size = (4, 33, 9, 3)
