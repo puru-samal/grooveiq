@@ -102,7 +102,7 @@ class DrumMIDIDataset(Dataset):
         
     
     
-    def collate_fn(self, batch: List[Tuple[SampleData, torch.Tensor, Dict]], dataset) -> Dict[str, torch.Tensor]:
+    def collate_fn(self, batch: List[Tuple[SampleData, torch.Tensor, Dict]]) -> Dict[str, torch.Tensor]:
         """
         Collate a batch of (SampleData, grid, stats) into padded tensors and metadata.
         

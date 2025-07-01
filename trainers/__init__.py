@@ -1,4 +1,4 @@
 from .base_trainer import BaseTrainer
-from .iqae_trainer import IQAE_Trainer
+from .grooveiq_trainer import GrooveIQ_Trainer
 
-__all__ = ["BaseTrainer", "IQAE_Trainer"]
+__all__ = ["BaseTrainer", "GrooveIQ_Trainer"]

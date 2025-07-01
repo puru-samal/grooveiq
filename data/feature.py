@@ -685,7 +685,8 @@ class DrumMIDIFeature:
                 hit = hits[e, t]
                 velocity = velocities[e, t]
                 offset = offsets[e, t]
-
+                
+                '''
                 # Check for ghost articulation: no hit, but velocity or offset nonzero
                 is_ghost = (hit == 0) and ((velocity > 0.01) or (abs(offset) > 0.01))
 
@@ -693,6 +694,7 @@ class DrumMIDIFeature:
                     # Plot ghost marker: red X
                     ax.scatter(t, e, s=100, c='red', marker='X', edgecolors='k', linewidths=0.5)
                     continue
+                '''
 
                 if hit == 0:
                     continue

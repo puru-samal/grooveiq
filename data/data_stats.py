@@ -84,6 +84,19 @@ class SampleData:
             feature=feature_segment,
         )
     
+    def to_dict(self) -> dict:
+        """Convert the sample to a dictionary."""
+        return {
+            "id": self.id,
+            "map": self.map,
+            "style": self.style,
+            "time_signature": self.time_signature,
+            "type": self.type,
+            "metadata": self.metadata,
+            "num_bars": self.num_bars,
+            "midi_bytes": self.midi_bytes,
+        }
+    
     def dump(self, path: str) -> None:
         """Dump the sample to a MIDI file."""
         with open(path, "w") as f:
