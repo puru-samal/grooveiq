@@ -212,7 +212,8 @@ class GrooveIQ(nn.Module):
                 )
                 out_step = dec_out[:, -1, :] # (B, E * M)
             else:
-                dec_out = self.decoder(tgt_embed, mem_embed) # (B, E * M)
+                mem_pad_mask = (button_hvo[:, :t + 1, :, 0].sum(dim=-1) == 0).int() # (B, T)
+                dec_out = self.decoder(tgt_embed, mem_embed * (~mem_pad_mask).unsqueeze(-1)) # (B, E * M)
                 out_step = dec_out[:, -1, :] # (B, E * M)
 
             pred_step = out_step.view(B, E, M)

@@ -151,17 +151,6 @@ class DrumAxialTransformer(nn.Module):
 
         def get_ff():
             """
-            Lightweight feedforward block: norm → conv → activation.
-            """
-            
-            return nn.Sequential(
-                ChanLayerNorm(embed_dim),
-                nn.Conv2d(embed_dim, embed_dim, 3, padding=1),
-                nn.LeakyReLU(inplace=True)
-            )
-
-            '''
-            """
             Simple feedforward block: norm → expand channels → activation → project back.
             """
             return nn.Sequential(
@@ -170,7 +159,6 @@ class DrumAxialTransformer(nn.Module):
                 nn.LeakyReLU(inplace=True),
                 nn.Conv2d(self.embed_dim * 4, self.embed_dim, 3, padding=1)
             )
-            '''
 
         layers = nn.ModuleList([])
         for _ in range(depth):
