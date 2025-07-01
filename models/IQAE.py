@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchinfo import summary
 from .sub_modules import *
-from vector_quantize_pytorch import VectorQuantize
 
 class DrumAxialTransformer(nn.Module):
     def __init__(self, T=33, E=9, M=3, embed_dim=128, depth=6, heads=8, dim_heads=None, reversible=True):
@@ -110,7 +109,7 @@ class IQAE(nn.Module):
     """
     def __init__(self, 
                  T=33, E=9, M=3,
-                 #z_dim=64,
+                 z_dim=64,
                  embed_dim=128, encoder_depth=4, encoder_heads=4,
                  decoder_depth=2, decoder_heads=4, 
                  num_buttons=2, num_bins_velocity=8, num_bins_offset=16
@@ -132,7 +131,7 @@ class IQAE(nn.Module):
         self.T = T
         self.E = E
         self.M = M
-
+        self.z_dim = z_dim
         self.embed_dim = embed_dim
         self.encoder_depth = encoder_depth
         self.encoder_heads = encoder_heads
@@ -147,13 +146,14 @@ class IQAE(nn.Module):
                                 dim_heads=None, reversible=False
                         )
         
-        #self.z_mu_proj = nn.Linear(embed_dim, z_dim)
-        #self.z_logvar_proj = nn.Linear(embed_dim, z_dim)
-        self.attn_proj = nn.Linear(embed_dim, 1)
-        self.latent_projection = nn.Linear(embed_dim, num_buttons * M) # Pick offset from input features
+        self.z_mu_proj     = nn.Linear(embed_dim, z_dim)
+        self.z_logvar_proj = nn.Linear(embed_dim, z_dim)
+        self.attn_proj_instr   = nn.Linear(embed_dim, 1)
+        self.button_projection = nn.Linear(embed_dim, num_buttons * M) # Pick offset from input features
 
         self.dec_inp_proj    = nn.Linear(E * M, embed_dim) # (B, T', E*M) -> (B, T', D)
-        self.dec_button_proj = nn.Linear(num_buttons * M, embed_dim) # (B, T', num_buttons*M) -> (B, T', D)
+        self.dec_button_proj = nn.Linear(z_dim + num_buttons * M, embed_dim) # (B, T', z_dim + num_buttons*M) -> (B, T', D)
+        #self.dec_button_proj = nn.Linear(num_buttons * M, embed_dim) # (B, T', num_buttons*M) -> (B, T', D)
         
         self.decoder = nn.TransformerDecoder(
             decoder_layer = nn.TransformerDecoderLayer(d_model=embed_dim, nhead=decoder_heads, batch_first=True, norm_first=True),
@@ -167,12 +167,17 @@ class IQAE(nn.Module):
         self.velocity_quantizer = LearnableBinsQuantizer(num_bins_velocity, min_val=0.0, max_val=1.0)
         self.offset_quantizer = LearnableBinsQuantizer(num_bins_offset, min_val=-0.5, max_val=0.5)
 
-    def aggregate(self, encoded):
-        # encoded: (B, T, E, D)
-        attn_scores = self.attn_proj(encoded)  # (B, T, E, 1)
+    def aggregate_instrument(self, encoded):
+        # (B, T, E, D) -> (B, T, D)
+        attn_scores = self.attn_proj_instr(encoded)  # (B, T, E, 1)
         attn_scores = attn_scores.squeeze(-1)  # (B, T, E)
         attn_weights = F.softmax(attn_scores, dim=-1)  # (B, T, E)
         latent = torch.sum(encoded * attn_weights.unsqueeze(-1), dim=2)  # (B, T, D)
+        return latent
+    
+    def aggregate_time(self, encoded):
+        # (B, T, D) -> (B, D)
+        latent = encoded.mean(dim=1) # (B, D)
         return latent
 
     def encode(self, x):
@@ -183,36 +188,37 @@ class IQAE(nn.Module):
             latent: Tensor of shape (B, T, num_buttons, M)
         """
         B, T, E, M = x.shape
-        encoded = self.encoder(x)               # (B, T, E, D)
-        latent = self.aggregate(encoded)        # (B, T, D)
-        latent = self.latent_projection(latent) # (B, T, num_buttons * M)
+        encoded = self.encoder(x)                   # (B, T, E, D)
+        latent = self.aggregate_instrument(encoded) # (B, T, D)
+        
+        # Button latent
+        button_latent = self.button_projection(latent)     # (B, T, num_buttons * M)
+        button_latent = button_latent.view(B, T, self.num_buttons, M) # (B, T, num_buttons, M)
 
         # z
-        #mu = self.z_mu_proj(latent.mean(dim=1))          # (B, z_dim)
-        #logvar = self.z_logvar_proj(latent.mean(dim=1))  # (B, z_dim)
-        #std = torch.exp(0.5 * logvar)
-        #eps = torch.randn_like(std)
-        #z = mu + eps * std  # Reparameterization # (B, z_dim)
-        #kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean() # (B)
-
-        button_latent = latent.view(B, T, self.num_buttons, M) # (B, T, num_buttons, M)
-        return button_latent
+        mu = self.z_mu_proj(self.aggregate_time(latent))          # (B, z_dim)
+        logvar = self.z_logvar_proj(self.aggregate_time(latent))  # (B, z_dim)
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std  # Reparameterization # (B, z_dim)
+        kl_loss = (-0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)).mean() # (B)
+        
+        return button_latent, z, kl_loss
     
     def straight_through_binarize(self, x, threshold=0.5):
         """Applies hard threshold during forward, identity gradient during backward."""
         hard = (x > threshold).float()
         return x + (hard - x).detach()
     
-
     def make_button_hvo(self, button_latent):
         """
         Args:
             latent: Tensor of shape (B, T, num_buttons, M)
         Returns:
-            button_hvo: (B, T, num_buttons, M) — [activation_flag, velocity, offset]
+            button_hvo: (B, T, num_buttons, M) — [hit, velocity, offset]
         """
         # Get hits and velocity from latent
-        hits_latent = button_latent[:, :, :, 0]       # (B, T, num_buttons)
+        hits_latent     = button_latent[:, :, :, 0]   # (B, T, num_buttons)
         velocity_latent = button_latent[:, :, :, 1]   # (B, T, num_buttons)
         offset_latent   = button_latent[:, :, :, 2]   # (B, T, num_buttons)
         hits_latent     = torch.sigmoid(hits_latent)
@@ -225,12 +231,12 @@ class IQAE(nn.Module):
         return button_hvo  # (B, T, num_buttons, M)
 
 
-    def decode(self, input, button_hvo):
+    def decode(self, input, button_hvo, z):
         """
         Args:
             input: Tensor of shape  (B, T, E, M)
             button_hvo: Tensor of shape (B, T, num_buttons, M)
-            change_mask: Tensor of shape (B, T)
+            z: Tensor of shape (B, z_dim)
         Returns:
             h: Tensor of shape (B, T, E)
             v: Tensor of shape (B, T, E)
@@ -246,18 +252,21 @@ class IQAE(nn.Module):
         target = self.pos_emb(target) # (B, T', D)
         target_causal_mask = CausalMask(target) # (T', T')
         
-        memory = self.dec_button_proj(button_hvo.view(B, T, num_buttons * M))  # (B, T', D)
+        button_hit_mask = (~(button_hvo[:, :, :, 0].sum(dim=-1) == 0)).float().unsqueeze(-1) # (B, T, 1)
+        combined_latent = torch.cat([z.unsqueeze(1).expand(-1, T, -1), button_hvo.view(B, T, num_buttons * M) * button_hit_mask], dim=2) # (B, T, z_dim + num_buttons * M)
+        memory = self.dec_button_proj(combined_latent)  # (B, T', D)
+        #memory = self.dec_button_proj(button_hvo.view(B, T, num_buttons * M))  # (B, T', D)
         memory = self.pos_emb(memory) # (B, T', D)
         memory_causal_mask = CausalMask(memory) # (T', T')
-        memory_padding_mask = button_hvo[:, :, :, 0].sum(dim=-1) # (B, T')
-        memory_padding_mask = (memory_padding_mask == 0).bool()  # (B, T')
+        #memory_padding_mask = button_hvo[:, :, :, 0].sum(dim=-1) # (B, T')
+        #memory_padding_mask = (memory_padding_mask == 0).bool()  # (B, T')
 
         decoder_out = self.decoder(
             tgt = target, 
             memory = memory,
             tgt_mask = target_causal_mask,
             memory_mask = memory_causal_mask,
-            memory_key_padding_mask = memory_padding_mask,
+            #memory_key_padding_mask = memory_padding_mask,
             tgt_is_causal = True,
             memory_is_causal = True
         ) # (B, T', D)
@@ -283,21 +292,25 @@ class IQAE(nn.Module):
             x: Tensor of shape (B, T, E, M)
 
         Returns:
-            h: Tensor of shape (B, T, E)
+            h_logits: Tensor of shape (B, T, E)
             v: Tensor of shape (B, T, E)
             o: Tensor of shape (B, T, E)
-            hits_latent: Tensor of shape (B, T)
-            button_hits_seq: Tensor of shape (B, T)
-            button_velocity_seq: Tensor of shape (B, T)
+            button_latent: Tensor of shape (B, T, num_buttons, M)
+            button_hvo: Tensor of shape (B, T, num_buttons, M)
+            velocity_penalty: Tensor of shape (B)
+            offset_penalty: Tensor of shape (B)
+            z: Tensor of shape (B, z_dim)
+            kl_loss: Tensor of shape (B)
         """
         # ========== ENCODING ==========
-        latent = self.encode(x)             # (B, T, M-1)
+        #latent = self.encode(x)             # (B, T, M-1)
+        button_latent, z, kl_loss = self.encode(x) # (B, T, num_buttons, M), (B, z_dim), (B)
 
         # ========== MAKE BUTTON HVO ==========
-        button_hvo = self.make_button_hvo(latent) # (B, T, num_buttons, M)
+        button_hvo = self.make_button_hvo(button_latent) # (B, T, num_buttons, M)
 
         # ========== DECODING ==========
-        h_logits, v, o = self.decode(x, button_hvo) # (B, T, E), (B, T, E), (B, T, E)
+        h_logits, v, o = self.decode(x, button_hvo, z) # (B, T, E), (B, T, E), (B, T, E)
 
         button_hits = button_hvo[:, :, :, 0] # (B, T, num_buttons)
         button_velocity = button_hvo[:, :, :, 1] # (B, T, num_buttons)
@@ -314,9 +327,9 @@ class IQAE(nn.Module):
         velocity_penalty = (button_velocity * no_hit_mask).abs().mean()
         offset_penalty = (button_offset * no_hit_mask).abs().mean()
         
-        return h_logits, v, o, latent, button_hvo, velocity_penalty, offset_penalty
+        return h_logits, v, o, button_latent, button_hvo, velocity_penalty, offset_penalty, z, kl_loss
     
-    def generate(self, button_hvo, max_steps=None):
+    def generate(self, button_hvo, z = None, max_steps=None):
         """
         Generate a prediction for the input at time t, given input < t, button HVO <= t, and change mask <= t.
         Args:
@@ -325,26 +338,37 @@ class IQAE(nn.Module):
         Returns:
             hvo_pred: Tensor of shape (B, T, E, 3)
         """
+        if z is None:
+            z = self.sample_z(button_hvo.shape[0], button_hvo.device)
+        
         B, T, num_buttons, M = button_hvo.shape
         E = self.E
         T_gen = max_steps or T # (B, T, num_buttons, M)
 
         generated = self.sos_token.unsqueeze(0).repeat(B, 1, 1, 1) # (B, 1, E, M)
+        button_hit_mask = (~(button_hvo[:, :, :, 0].sum(dim=-1) == 0)).float().unsqueeze(-1) # (B, T, 1)
         for t in range(T_gen):
             tgt_embed = self.dec_inp_proj(generated.view(B, t + 1, E * M)) # (B, T, D)
-            mem_embed = self.dec_button_proj(button_hvo[:, :t + 1].view(B, t + 1, num_buttons * M)) # (B, T, D)
+            combined_latent = torch.cat(
+                [
+                    z.unsqueeze(1).expand(-1, t + 1, -1), 
+                    button_hvo[:, :t + 1].view(B, t + 1, num_buttons * M) * button_hit_mask[:, :t + 1, :]
+                ], dim=2
+            ) # (B, T, z_dim + num_buttons * M)
+            mem_embed = self.dec_button_proj(combined_latent) # (B, T, D)
+            #mem_embed = self.dec_button_proj(button_hvo[:, :t + 1].view(B, t + 1, num_buttons * M)) # (B, T, D)
 
             tgt_embed_pos = self.pos_emb(tgt_embed)
             mem_embed_pos = self.pos_emb(mem_embed)
             tgt_mask = CausalMask(tgt_embed_pos)
             mem_mask = CausalMask(mem_embed_pos)
-            mem_pad_mask = (button_hvo[:, :t + 1, :, 0].sum(dim=-1) == 0).bool()
+            #mem_pad_mask = (button_hvo[:, :t + 1, :, 0].sum(dim=-1) == 0).bool()
             dec_out = self.decoder(
                 tgt = tgt_embed_pos, 
                 memory = mem_embed_pos, 
                 tgt_mask = tgt_mask, 
                 memory_mask = mem_mask, 
-                memory_key_padding_mask = mem_pad_mask,
+                #memory_key_padding_mask = mem_pad_mask,
                 tgt_is_causal = True,   
                 memory_is_causal = True
             ) # (B, t + 1, D)
@@ -362,7 +386,12 @@ class IQAE(nn.Module):
 
 if __name__ == "__main__":
     input_size = (4, 33, 9, 3)
-    encoder = IQAE(T=33, E=9, M=3, embed_dim=128, encoder_depth=4, encoder_heads=4, decoder_depth=1, decoder_heads=2, num_buttons=3, num_bins_velocity=8, num_bins_offset=16)
+    encoder = IQAE(
+        T=33, E=9, M=3, z_dim=64, 
+        embed_dim=128, encoder_depth=4, encoder_heads=4, 
+        decoder_depth=1, decoder_heads=2, 
+        num_buttons=3, num_bins_velocity=8, num_bins_offset=16
+    )
     summary(encoder, input_size=input_size)
 
 

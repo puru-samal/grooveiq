@@ -45,7 +45,13 @@ class ConstraintLosses(nn.Module):
         """
         L1 sparsity penalty directly on z to encourage sparsity in activations.
         """
-        return torch.mean(torch.abs(z)) if self.reduction == "mean" else torch.sum(torch.abs(z))
+        return self._reduce(torch.abs(z))
+
+    def l1_sparsity_time(self, z):
+        """
+        L1 sparsity penalty on temporal dimension of z to encourage sparsity in activations.
+        """
+        return self._reduce(torch.norm(z, p=1, dim=-1))
     
     def l2_sparsity(self, z):
         """

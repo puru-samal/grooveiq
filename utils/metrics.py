@@ -3,14 +3,11 @@ import torch.nn.functional as F
 
 class DrumMetrics:
     @staticmethod
-    def hit_metrics(pred_logits, target_hits, threshold=0.5):
-        pred_int = (torch.sigmoid(pred_logits) > threshold).int()
-        target_int = target_hits.int()
-
-        tp = ((pred_int == 1) & (target_int == 1)).sum().item()
-        fp = ((pred_int == 1) & (target_int == 0)).sum().item()
-        fn = ((pred_int == 0) & (target_int == 1)).sum().item()
-        tn = ((pred_int == 0) & (target_int == 0)).sum().item()
+    def hit_metrics(pred_hits, target_hits):
+        tp = ((pred_hits == 1) & (target_hits == 1)).sum().item()
+        fp = ((pred_hits == 1) & (target_hits == 0)).sum().item()
+        fn = ((pred_hits == 0) & (target_hits == 1)).sum().item()
+        tn = ((pred_hits == 0) & (target_hits == 0)).sum().item()
 
         acc = (tp + tn) / (tp + fp + fn + tn) if (tp + fp + fn + tn) > 0 else 0.0
         ppv = tp / (tp + fp) if (tp + fp) > 0 else 0.0
