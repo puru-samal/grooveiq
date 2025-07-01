@@ -97,8 +97,7 @@ class IQAE_Trainer(BaseTrainer):
         # Initialize accumulators
         running_latent_penalty = 0.0
         running_kld_loss = 0.0
-        running_velocity_penalty = 0.0
-        running_offset_penalty = 0.0
+        running_vo_penalty = 0.0
         running_joint_loss = 0.0
         running_sample_count = 0
         
@@ -124,7 +123,7 @@ class IQAE_Trainer(BaseTrainer):
             h_true, v_true, o_true = grids[:, :, :, 0], grids[:, :, :, 1], grids[:, :, :, 2]
 
             with torch.autocast(device_type=self.device, dtype=torch.float16):
-                h_logits, v_pred, o_pred, button_latent, button_hvo, velocity_penalty, offset_penalty, z, kl_loss = self.model(grids)
+                h_logits, v_pred, o_pred, button_latent, button_hvo, vo_penalty, z, kl_loss = self.model(grids)
 
                 hit_penalty = torch.where(h_true == 1, 10.0, 0.0)
 
@@ -144,7 +143,7 @@ class IQAE_Trainer(BaseTrainer):
                 kld_loss = (kl_loss * self.kld_weight)
 
                 # Joint loss
-                joint_loss = hit_bce + velocity_mse + offset_mse + velocity_penalty + offset_penalty + latent_penalty + kld_loss
+                joint_loss = hit_bce + velocity_mse + offset_mse + vo_penalty + latent_penalty + kld_loss
 
             # Compute hit accuracy safely
             hit_pred_int = (torch.sigmoid(h_logits) > 0.5).int()
@@ -167,8 +166,7 @@ class IQAE_Trainer(BaseTrainer):
             running_hit_bce += hit_bce.item() * batch_size
             running_velocity_mse += velocity_mse.item() * batch_size
             running_offset_mse += offset_mse.item() * batch_size
-            running_velocity_penalty += velocity_penalty.item() * batch_size
-            running_offset_penalty += offset_penalty.item() * batch_size
+            running_vo_penalty += vo_penalty.item() * batch_size
             running_latent_penalty += latent_penalty.item() * batch_size
             running_kld_loss += kld_loss.item() * batch_size
             running_joint_loss += joint_loss.item() * batch_size
@@ -196,8 +194,7 @@ class IQAE_Trainer(BaseTrainer):
             avg_offset_mse = running_offset_mse / running_sample_count
             avg_latent_penalty = running_latent_penalty / running_sample_count
             avg_kld_loss = running_kld_loss / running_sample_count
-            avg_velocity_penalty = running_velocity_penalty / running_sample_count
-            avg_offset_penalty = running_offset_penalty / running_sample_count
+            avg_vo_penalty = running_vo_penalty / running_sample_count
             avg_joint_loss = running_joint_loss / running_sample_count
             avg_hit_acc = running_hit_acc / running_sample_count
             avg_hit_ppv = running_hit_ppv / running_sample_count
@@ -213,8 +210,7 @@ class IQAE_Trainer(BaseTrainer):
                 h_perplexity=f"{avg_hit_perplexity:.4f}",
                 v_mse=f"{avg_velocity_mse:.4f}",
                 o_mse=f"{avg_offset_mse:.4f}",
-                velocity_penalty=f"{avg_velocity_penalty:.4f}",
-                offset_penalty=f"{avg_offset_penalty:.4f}",
+                vo_penalty=f"{avg_vo_penalty:.4f}",
                 latent_penalty=f"{avg_latent_penalty:.4f}",
                 kld_loss=f"{avg_kld_loss:.4f}",
                 joint=f"{avg_joint_loss:.4f}",
@@ -248,8 +244,7 @@ class IQAE_Trainer(BaseTrainer):
             'offset_mse': running_offset_mse / running_sample_count,
             'latent_penalty': running_latent_penalty / running_sample_count,
             'kld_loss': running_kld_loss / running_sample_count,
-            'velocity_penalty': running_velocity_penalty / running_sample_count,
-            'offset_penalty': running_offset_penalty / running_sample_count,
+            'vo_penalty': running_vo_penalty / running_sample_count,
             'joint_loss': running_joint_loss / running_sample_count,
         }
 
@@ -547,227 +542,3 @@ class IQAE_Trainer(BaseTrainer):
         for result in val_results:
             result['generated_sample'].dump(midi_dir / f"{result['generated_sample'].id}.mid")
         pass
-
-''' 
-# INTERNAL USE ONLY
-class ProgressiveTrainer(ASRTrainer):
-    """
-    Progressive Trainer class that implements curriculum learning for ASR training.
-
-    This trainer extends ASRTrainer to implement:
-    1. Stage-based training with increasing model complexity
-    2. Gradual unfreezing of model layers
-    3. Dynamic data subsetting
-    4. Smooth transition to full model training
-
-    Implementation Tasks:
-    - TODO: Store original model layers in __init__
-    - TODO: Configure model for each stage in configure_stage
-    - TODO: Implement progressive training loop in progressive_train
-    - TODO: Handle transition to full training in transition_to_full_training
-    - TODO: Create data subsets in get_subset_dataloader
-
-    Implementation Notes:
-    1. For __init__:
-        - Store original encoder and decoder layers
-        - Initialize stage counter
-        
-    2. For configure_stage:
-        - Update dropout and label smoothing
-        - Activate specified encoder and decoder layers
-        - Handle layer freezing based on configuration
-        - Print detailed configuration information
-        
-    3. For progressive_train:
-        - Configure model for each stage
-        - Create appropriate data subset
-        - Train using parent class methods
-        
-    4. For transition_to_full_training:
-        - Restore all model layers
-        - Reset loss function parameters
-        - Unfreeze all parameters
-        - Reset best metrics
-        
-    5. For get_subset_dataloader:
-        - Create subset while preserving dataset attributes
-        - Maintain collate function and other dataloader settings
-    """
-    def __init__(self, model, tokenizer, config, run_name, config_file, device=None):
-        super().__init__(model, tokenizer, config, run_name, config_file, device)
-        self.current_stage = 0
-        # Store original layer states
-        self.all_encoder_layers = list(self.model.enc_layers)
-        self.all_decoder_layers = list(self.model.dec_layers)
-
-
-    def configure_stage(self, stage_config):
-        """Configure model for current training stage"""
-        # Create a pretty header
-        print("\n" + "="*80)
-        print(f"Starting Stage: {stage_config['name']}".center(80))
-        print("="*80)
-        
-        # Print key configuration details
-        print(f"\nConfiguration Details:")
-        print(f"├── Data Subset: {stage_config['data_subset']*100:.1f}% of training data")
-        print(f"├── Training Epochs: {stage_config['epochs']}")
-        print(f"├── Dropout: {stage_config['dropout']}")
-        print(f"├── Label Smoothing: {stage_config['label_smoothing']}")
-        
-        # Update dropout and label smoothing
-        self.model.dropout.p = stage_config['dropout']
-        self.ce_criterion = nn.CrossEntropyLoss(
-            ignore_index=self.tokenizer.pad_id,
-            label_smoothing=stage_config['label_smoothing']
-        )
-        
-        # Get freeze configurations
-        encoder_freeze = stage_config.get('encoder_freeze', [])
-        decoder_freeze = stage_config.get('decoder_freeze', [])
-        
-        # Activate and configure encoder layers
-        encoder_active_layers = stage_config['encoder_active_layers']
-        if encoder_freeze and len(encoder_freeze) != len(encoder_active_layers):
-            raise ValueError(f"Encoder freeze list length ({len(encoder_freeze)}) must match number of active encoder layers ({len(encoder_active_layers)})")
-        
-        # Set the active encoder layers of the model
-        self.model.enc_layers = nn.ModuleList([
-            self.all_encoder_layers[i] for i in encoder_active_layers
-        ])
-        self.model.num_encoder_layers = len(encoder_active_layers)
-        
-        # Activate and configure decoder layers
-        decoder_active_layers = stage_config['decoder_active_layers']
-        if decoder_freeze and len(decoder_freeze) != len(decoder_active_layers):
-            raise ValueError(f"Decoder freeze list length ({len(decoder_freeze)}) must match number of active decoder layers ({len(decoder_active_layers)})")
-        
-        # Set the active decoder layers of the model
-        self.model.dec_layers = nn.ModuleList([
-            self.all_decoder_layers[i] for i in decoder_active_layers
-        ])
-        self.model.num_decoder_layers = len(decoder_active_layers)
-
-        # Handle layer freezing
-        frozen_count = 0
-        trainable_count = 0
-        
-        # Configure encoder layers freezing
-        print("├── Encoder Layers:")
-        for idx, layer in enumerate(self.model.enc_layers):
-            should_freeze = encoder_freeze[idx]
-            for param in layer.parameters():
-                param.requires_grad = not should_freeze
-                if should_freeze:
-                    frozen_count += param.numel()
-                else:
-                    trainable_count += param.numel()
-            print(f"│   ├── Layer {encoder_active_layers[idx]}: {'Frozen' if should_freeze else 'Trainable'}")
-        
-        # Configure decoder layers
-        print("├── Decoder Layers:")
-        for idx, layer in enumerate(self.model.dec_layers):
-            should_freeze = decoder_freeze[idx]
-            for param in layer.parameters():
-                param.requires_grad = not should_freeze
-                if should_freeze:
-                    frozen_count += param.numel()
-                else:
-                    trainable_count += param.numel()
-            print(f"│   ├── Layer {decoder_active_layers[idx]}: {'Frozen' if should_freeze else 'Trainable'}")
-        
-        print(f"├── Frozen Parameters: {frozen_count:,}")
-        print(f"└── Trainable Parameters: {trainable_count:,}")
-    
-
-    def progressive_train(self, train_dataloader, val_dataloader, stages: List[Dict[str, Any]]):
-        """Progressive training through stages"""
-        # Train through stages
-        for stage_idx, stage_config in enumerate(stages):
-            self.current_stage = stage_idx
-            self.configure_stage(stage_config)
-            # Get subset of train_dataloader
-            subset_train_dataloader = self.get_subset_dataloader(train_dataloader, stage_config['data_subset'])
-            super().train(subset_train_dataloader, val_dataloader, epochs=stage_config['epochs'])
-
-    def transition_to_full_training(self):
-        """Transition from progressive training to full training"""
-        print("\n=== Transitioning to Full Training ===")
-        
-        # Restore all layers
-        self.model.enc_layers = nn.ModuleList(self.all_encoder_layers)
-        self.model.dec_layers = nn.ModuleList(self.all_decoder_layers)
-        self.model.num_encoder_layers = len(self.all_encoder_layers)
-        self.model.num_decoder_layers = len(self.all_decoder_layers)
-
-        # Restore CrossEntropyLoss
-        self.ce_criterion = nn.CrossEntropyLoss(
-            ignore_index=self.tokenizer.pad_id,
-            label_smoothing=self.config['loss']['label_smoothing']
-        )
-        
-        # Unfreeze all parameters
-        unfrozen_count = 0
-        for param in self.model.parameters():
-            param.requires_grad = True
-            unfrozen_count += param.numel()
-        print(f"├── Total Unfrozen Parameters: {unfrozen_count:,}")
-        
-        # Reset best metrics for new training phase
-        self.best_metric = float('inf')
-
-    
-    def train(self, train_dataloader, val_dataloader, epochs):
-        """
-        Run full training phase.
-        It is recommended to set the optimizer and scheduler explicitly before calling this function.
-        like this:
-        cls.optimizer = create_optimizer(self.model, self.config['optimizer'])
-        cls.scheduler = create_scheduler(cls.optimizer, cls.config['scheduler'], train_dataloader)
-        cls.progressive_train(train_dataloader, val_dataloader, stages)
-        """
-        self.transition_to_full_training()
-        super().train(train_dataloader, val_dataloader, epochs=epochs)
-
-
-    def get_subset_dataloader(self, dataloader, subset_fraction):
-        """
-        Creates a new DataLoader with a subset of the original data while preserving dataset attributes.
-        
-        Args:
-            dataloader: Original DataLoader
-            subset_fraction: Float between 0 and 1 indicating what fraction of data to keep
-        
-        Returns:
-            New DataLoader containing only the subset of data
-        """
-        # Calculate how many samples we want to keep
-        dataset = dataloader.dataset
-        total_samples = len(dataset)
-        subset_size = int(total_samples * subset_fraction)
-        
-        # Create random indices for the subset
-        indices = torch.randperm(total_samples)[:subset_size]
-        
-        # Create a Subset dataset
-        subset_dataset = Subset(dataset, indices)
-        
-        # Add necessary attributes from original dataset to subset
-        subset_dataset.text_max_len = dataset.text_max_len
-        subset_dataset.feat_max_len = dataset.feat_max_len
-        subset_dataset.get_avg_chars_per_token = dataset.get_avg_chars_per_token
-        
-        # Create new DataLoader with same configuration as original
-        subset_loader = torch.utils.data.DataLoader(
-            subset_dataset,
-            batch_size=self.config['data']['batch_size'],
-            shuffle=True,
-            num_workers=self.config['data']['NUM_WORKERS'],
-            collate_fn=dataset.collate_fn,
-            pin_memory=True
-        )
-        
-        return subset_loader
-        
-'''      
-        

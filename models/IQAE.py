@@ -312,7 +312,7 @@ class IQAE(nn.Module):
         # ========== DECODING ==========
         h_logits, v, o = self.decode(x, button_hvo, z) # (B, T, E), (B, T, E), (B, T, E)
 
-        button_hits = button_hvo[:, :, :, 0] # (B, T, num_buttons)
+        button_hits     = button_hvo[:, :, :, 0] # (B, T, num_buttons)
         button_velocity = button_hvo[:, :, :, 1] # (B, T, num_buttons)
         button_offset   = button_hvo[:, :, :, 2] # (B, T, num_buttons)
         
@@ -323,11 +323,14 @@ class IQAE(nn.Module):
         # Penalize button hits in those frames
         #button_penalty = (button_hits * no_input_hit)
 
-        no_hit_mask = (button_hits == 0).float()
-        velocity_penalty = (button_velocity * no_hit_mask).abs().mean()
-        offset_penalty = (button_offset * no_hit_mask).abs().mean()
+        no_hit_mask = (button_hits == 0).float().unsqueeze(-1) # (B, T, num_buttons, 1)
+        vo_penalty  = torch.stack([
+            button_velocity, 
+            button_offset
+        ], dim=-1) * no_hit_mask # (B, T, num_buttons, 2)
+        vo_penalty = vo_penalty.abs().mean()
         
-        return h_logits, v, o, button_latent, button_hvo, velocity_penalty, offset_penalty, z, kl_loss
+        return h_logits, v, o, button_latent, button_hvo, vo_penalty, z, kl_loss
     
     def generate(self, button_hvo, z = None, max_steps=None):
         """
