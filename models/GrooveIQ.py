@@ -6,6 +6,7 @@ from .sub_modules import PositionalEncoding
 from .sub_modules.encoders import DrumEncoderWrapper
 from .sub_modules.decoders import DrumDecoderWrapper
 from .sub_modules.bin_quantizer import LearnableBinsQuantizer
+from .sub_modules.masks import CausalMask
 from torchinfo import summary
 
 # -----------------------------------
@@ -136,8 +137,8 @@ class GrooveIQ(nn.Module):
         tgt_embed = self.dec_inp_proj(target.view(B, T, E * M)) # (B, T, D)
         mem_embed = self.dec_button_proj(button_hvo.view(B, T, num_buttons * M)) # (B, T, D)
 
-        tgt_mask = torch.triu(torch.ones(T, T, device=input.device), diagonal=1).bool() if self.decoder.decoder_type == "transformer" else None # (T, T)
-        mem_mask = torch.triu(torch.ones(T, T, device=input.device), diagonal=1).bool() if self.decoder.decoder_type == "transformer" else None
+        tgt_mask = CausalMask(tgt_embed) if self.decoder.decoder_type == "transformer" else None # (T, T)
+        mem_mask = CausalMask(mem_embed) if self.decoder.decoder_type == "transformer" else None
         mem_pad_mask = (button_hvo[:, :, :, 0].sum(dim=-1) == 0).bool() if self.decoder.decoder_type == "transformer" else None
 
         dec_out = self.decoder(
