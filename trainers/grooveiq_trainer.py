@@ -213,7 +213,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             train_metrics, train_plots = self._train_epoch(train_dataloader)
             
             # Validate
-            val_metrics, val_results = self._validate_epoch(val_dataloader, num_batches=1)
+            val_metrics, val_results = self._validate_epoch(val_dataloader, num_batches=5)
 
             # Step ReduceLROnPlateau scheduler with validation loss
             if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
