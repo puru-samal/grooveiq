@@ -83,7 +83,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             with torch.autocast(device_type=self.device, dtype=torch.float16):
                 h_logits, v_pred, o_pred, latent, button_hvo, velocity_penalty, offset_penalty = self.model(grids)
 
-                hit_penalty = torch.where(h_true == 1, 10.0, 0.0)
+                hit_penalty = torch.where(h_true == 1, self.hit_penalty, 0.0)
 
                 hit_bce = self.hit_loss(h_logits, h_true).mean()
                 velocity_mse = (self.velocity_loss(v_pred, v_true) * hit_penalty).mean()
@@ -93,7 +93,7 @@ class GrooveIQ_Trainer(BaseTrainer):
 
             # Metrics
             batch_size = grids.size(0)
-            metrics = DrumMetrics.hit_metrics(h_logits, h_true)
+            metrics = DrumMetrics.hit_metrics((torch.sigmoid(h_logits) > 0.5).int(), h_true.int())
             hit_perplexity = DrumMetrics.perplexity(hit_bce)
             velocity_mae = DrumMetrics.mae_metrics(v_pred, v_true)
             velocity_corr = DrumMetrics.pearson_corr(v_pred, v_true)
@@ -277,7 +277,6 @@ class GrooveIQ_Trainer(BaseTrainer):
             for i, batch in enumerate(dataloader):
                 # Get data
                 grids, samples = batch['grid'].to(self.device), batch['samples']
-                h_true, v_true, o_true = grids[:, :, :, 0], grids[:, :, :, 1], grids[:, :, :, 2]
                 
                 # Get latent
                 latent = self.model.encode(grids)
@@ -306,6 +305,7 @@ class GrooveIQ_Trainer(BaseTrainer):
                         'generated_grid': generated_grid,
                         'target_sample': target_sample,
                         'target_grid': target_grid,
+                        "button_hvo": button_hvo[b, :, :, :].cpu().detach(),
                     })
                 
                 # Update progress bar
@@ -332,7 +332,7 @@ class GrooveIQ_Trainer(BaseTrainer):
         offset_mse = offset_mae = offset_tightness = offset_ahead = offset_behind = 0.0
 
         for ref, hyp in zip(references, hypotheses):
-            metrics = DrumMetrics.hit_metrics(hyp[:, :, 0], ref[:, :, 0])
+            metrics = DrumMetrics.hit_metrics(hyp[:, :, 0].int(), ref[:, :, 0].int())
             hit_acc += metrics["acc"]
             hit_ppv += metrics["ppv"]
             hit_tpr += metrics["tpr"]
@@ -456,6 +456,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             results.append({
                 'generated_sample': result['generated_sample'].to_dict(),
                 'target_sample': result['target_sample'].to_dict(),
+                'button_hvo': result['button_hvo'],
             })
         
         with open(midi_dir / f"val_results_{epoch}.pkl", "wb") as f:
