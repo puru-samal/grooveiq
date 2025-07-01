@@ -149,6 +149,7 @@ class IQAE(nn.Module):
         self.z_mu_proj     = nn.Linear(embed_dim, z_dim)
         self.z_logvar_proj = nn.Linear(embed_dim, z_dim)
         self.attn_proj_instr   = nn.Linear(embed_dim, 1)
+        self.time_attn_proj = nn.Linear(embed_dim, 1)
         self.button_projection = nn.Linear(embed_dim, num_buttons * M) # Pick offset from input features
 
         self.dec_inp_proj    = nn.Linear(E * M, embed_dim) # (B, T', E*M) -> (B, T', D)
@@ -177,7 +178,8 @@ class IQAE(nn.Module):
     
     def aggregate_time(self, encoded):
         # (B, T, D) -> (B, D)
-        latent = encoded.mean(dim=1) # (B, D)
+        attn_weights = F.softmax(self.time_attn_proj(encoded), dim=1)
+        latent = torch.sum(encoded * attn_weights, dim=1)
         return latent
 
     def encode(self, x):
