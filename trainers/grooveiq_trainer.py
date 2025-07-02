@@ -371,9 +371,9 @@ class GrooveIQ_Trainer(BaseTrainer):
 
         for reference, hypothesis, hit_prob in zip(references, hypotheses, hit_probs):
 
-            hit_pred_int = (hit_prob > self.threshold).int()
-            h_true_int   = reference[:, :, 0].int()
-            
+            hit_pred_int = ((hit_prob > self.threshold).int()).detach().cpu()
+            h_true_int   = reference[:, :, 0].int().detach().cpu()
+
             hit_tp = ((hit_pred_int == 1) & (h_true_int == 1)).sum().item() # True positives
             hit_fp = ((hit_pred_int == 1) & (h_true_int == 0)).sum().item()
             hit_fn = ((hit_pred_int == 0) & (h_true_int == 1)).sum().item()
