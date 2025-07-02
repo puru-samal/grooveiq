@@ -7,6 +7,7 @@ import os
 import numpy as np
 from symusic import Score, TimeUnit
 import math
+import torch
 
 
 def get_num_bars(duration: int, time_signature: tuple[int, int], tpq: int) -> float:

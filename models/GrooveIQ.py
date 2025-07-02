@@ -2,7 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchinfo import summary
-from .sub_modules import DrumAxialTransformer, PositionalEncoding, CausalMask, LearnableBinsQuantizer
+from torch.autograd import Function
+from .sub_modules import (
+    DrumAxialTransformer, 
+    PositionalEncoding, 
+    CausalMask, 
+    LearnableBinsQuantizer
+)
 
 import torch.nn as nn
 
@@ -53,6 +59,22 @@ class TransformerDecoderLayer(nn.TransformerDecoderLayer):
             x = self.norm3(x + self._ff_block(x))
 
         return x
+    
+
+
+class GradientReversal(Function):
+    @staticmethod
+    def forward(ctx, x, lambd=1.0):
+        ctx.lambd = lambd
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.lambd * grad_output, None
+
+
+def grad_reverse(x, lambd=1.0):
+    return GradientReversal.apply(x, lambd)
 
 
 
@@ -70,7 +92,8 @@ class GrooveIQ(nn.Module):
                  z_dim=64,
                  embed_dim=128, encoder_depth=4, encoder_heads=4,
                  decoder_depth=2, decoder_heads=4, 
-                 num_buttons=2, num_bins_velocity=8, num_bins_offset=16
+                 num_buttons=2, num_bins_velocity=8, num_bins_offset=16,
+                 adv_lambd=1.0
     ):
         """
         Args:
@@ -86,6 +109,7 @@ class GrooveIQ(nn.Module):
             num_buttons (int): Number of buttons.
             num_bins_velocity (int): Number of bins for velocity. (0 for no quantization)
             num_bins_offset (int): Number of bins for offset. (0 for no quantization)
+            adv_lambd: float
         """
         super().__init__()
         
@@ -98,6 +122,7 @@ class GrooveIQ(nn.Module):
         self.encoder_heads = encoder_heads
         self.decoder_depth = decoder_depth
         self.num_buttons   = num_buttons
+        self.adv_lambd     = adv_lambd
 
         self.is_velocity_quantized = num_bins_velocity > 0
         self.is_offset_quantized   = num_bins_offset > 0
@@ -115,6 +140,11 @@ class GrooveIQ(nn.Module):
         self.attn_proj_instr   = nn.Linear(embed_dim, 1)
         self.time_attn_proj    = nn.Linear(embed_dim, 1)
         self.button_projection = nn.Linear(embed_dim, num_buttons * M)
+        self.button_to_z_predictor = nn.Sequential(
+                                        nn.Linear(num_buttons * M, 2 * z_dim),
+                                        nn.ReLU(),
+                                        nn.Linear(2 * z_dim, z_dim)
+                                    )
 
         self.dec_inp_proj    = nn.Linear(E * M, embed_dim) # (B, T', E*M) -> (B, T', D)
         self.dec_button_proj = nn.Linear(z_dim + num_buttons * M, embed_dim) # (B, T', z_dim + num_buttons*M) -> (B, T', D)
@@ -150,7 +180,9 @@ class GrooveIQ(nn.Module):
         Args:
             x: Tensor of shape (B, T, E, M)
         Returns:
-            latent: Tensor of shape (B, T, num_buttons, M)
+            button_latent: Tensor of shape (B, T, num_buttons, M)
+            z: Tensor of shape (B, z_dim)
+            kl_loss: scalar
         """
         B, T, E, M = x.shape
         encoded = self.encoder(x)                   # (B, T, E, D)
@@ -197,6 +229,23 @@ class GrooveIQ(nn.Module):
         
         button_hvo      = torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1) # (B, T, num_buttons, M)
         return button_hvo 
+    
+    
+    def adv_decorr(self, button_latent, z):
+        # Flatten button sequence
+        B, T, num_buttons, M = button_latent.shape
+        button_flat = button_latent.view(B, T, num_buttons * M)  # (B, T, num_buttons * M)
+
+        # Predict z from buttons
+        button_pooled = button_flat.mean(dim=1) # (B, num_buttons * M)
+        z_pred = self.button_to_z_predictor(button_pooled) # (B, z_dim)
+
+        # Reverse gradients
+        z_reversed = grad_reverse(z, lambd=self.adv_lambd)
+
+        # Adversarial loss
+        adv_loss = F.mse_loss(z_pred, z_reversed.detach())
+        return adv_loss
 
     def decode(self, input, button_hvo, z):
         """
@@ -279,6 +328,9 @@ class GrooveIQ(nn.Module):
         # ========== MAKE BUTTON HVO ==========
         button_hvo = self.make_button_hvo(button_latent) # (B, T, num_buttons, M)
 
+        # ========== ADVERSARIAL DECORR ==========
+        adv_loss = self.adv_decorr(button_latent, z)
+
         # ========== DECODING ==========
         h_logits, v, o, attn_weights = self.decode(x, button_hvo, z) # (B, T, E), (B, T, E), (B, T, E)
 
@@ -294,7 +346,7 @@ class GrooveIQ(nn.Module):
         ], dim=-1) * no_hit_mask # (B, T, num_buttons, 2)
         vo_penalty = vo_penalty.abs().mean()
         
-        return h_logits, v, o, button_latent, button_hvo, vo_penalty, z, kl_loss, attn_weights
+        return h_logits, v, o, button_latent, button_hvo, vo_penalty, z, kl_loss, attn_weights, adv_loss
     
     def generate(self, button_hvo, z = None, max_steps=None):
         """

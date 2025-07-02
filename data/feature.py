@@ -585,6 +585,71 @@ class DrumMIDIFeature:
 
         return DrumMIDIFeature.from_score(score)
     
+
+    #########################################################################################
+    # Button HVO methods
+    #########################################################################################
+
+    def from_button_hvo(self, button_hvo: torch.Tensor, steps_per_quarter: int) -> 'DrumMIDIFeature':
+        """
+        Convert a button HVO tensor into a DrumMIDIFeature.
+        Button hits get mapped to notes in the canonical drum map.
+        """
+        T, E, M = button_hvo.shape
+        score = self.score.copy()
+        track = score.tracks[0]
+        track.notes = []
+        tpq = score.tpq
+        
+        # Build reverse drum map: index -> pitch
+        index_to_note = {i: note for i, note in enumerate(self.canonical_map.keys())}
+
+        for t in range(T):
+            for e in range(E):
+                hit, velocity, offset = button_hvo[t, e].tolist()
+                if hit > 0:
+                    pitch = index_to_note[e]
+                    # Calculate time in ticks
+                    t_exact = t + offset
+                    time = int(round((t_exact / steps_per_quarter) * tpq))
+                    if time < 0:
+                        time = 0
+                    note = Note(
+                        pitch=pitch,
+                        time=time,
+                        duration=tpq // steps_per_quarter,  # 1 grid step duration
+                        velocity=int(velocity * 127)
+                    )
+                    track.notes.append(note)
+
+        score.tracks[0] = track
+        return DrumMIDIFeature.from_score(score)
+    
+
+    def play_button_hvo(self, button_hvo: "DrumMIDIFeature", fs: int = 44100) -> None:
+        """
+        Play the button HVO.
+        Args:
+            button_hvo: DrumMIDIFeature object
+            fs: Sample rate for synthesis.
+        """
+        
+        if not _HAS_SOUNDDEVICE:
+            print("sounddevice not found, will not be able to play audio")
+            return
+        
+        shift_map = {pitch: 60 + i for i, pitch in enumerate(self.canonical_map.keys())}
+        shifted_score = button_hvo.score.copy()
+        for note in shifted_score.tracks[0].notes:
+            offset = shift_map[note.pitch] - note.pitch
+            note.shift_pitch(offset, inplace=True)
+
+        shifted_score.tracks[0].notes.sort(key=None, reverse=False, inplace=True)
+        audio_data = render(shifted_score, self.sf_path, fs)
+        sd.play(audio_data, fs)
+        sd.wait()
+
+    
     #########################################################################################
     # Play and plot methods
     #########################################################################################

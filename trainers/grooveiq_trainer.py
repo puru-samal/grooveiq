@@ -30,6 +30,7 @@ class GrooveIQ_Trainer(BaseTrainer):
         self.recons_weight = config['loss'].get('recons_weight', 1.0)
         self.kld_weight = config['loss'].get('kld_weight', 1.0)
         self.constraint_weight = config['loss'].get('constraint_weight', 0.1)
+        self.adv_weight = config['loss'].get('adv_weight', 1.0)
         
         # Loss functions
         # Reconstruction losses
@@ -62,6 +63,7 @@ class GrooveIQ_Trainer(BaseTrainer):
         running_latent_penalty = 0.0
         running_kld_loss = 0.0
         running_vo_penalty = 0.0
+        running_adv_loss   = 0.0
         running_joint_loss = 0.0
         running_sample_count = 0
         
@@ -83,7 +85,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             h_true, v_true, o_true = grids[:, :, :, 0], grids[:, :, :, 1], grids[:, :, :, 2]
 
             with torch.autocast(device_type=self.device, dtype=torch.float16):
-                h_logits, v_pred, o_pred, button_latent, button_hvo, vo_penalty, z, kl_loss, attn_weights = self.model(grids)
+                h_logits, v_pred, o_pred, button_latent, button_hvo, vo_penalty, z, kl_loss, attn_weights, adv_loss = self.model(grids)
 
                 # Hit penalty for penalizing velocity/offset when there is no hit
                 hit_penalty = torch.where(h_true == 1, self.hit_penalty, 0.0)
@@ -95,12 +97,12 @@ class GrooveIQ_Trainer(BaseTrainer):
 
                 # Constraint losses
                 latent_penalty = self.latent_loss(button_latent)
-                kld_loss = (kl_loss * self.kld_weight)
 
                 # Joint loss
                 joint_loss = self.recons_weight * (hit_bce + velocity_mse + offset_mse) + \
                              self.constraint_weight * latent_penalty + \
-                             self.kld_weight * kld_loss + vo_penalty
+                             self.kld_weight * kl_loss + \
+                             self.adv_weight * adv_loss + vo_penalty
 
             # Compute hit metrics
             hit_pred_int = (torch.sigmoid(h_logits) > self.threshold).int()
@@ -123,7 +125,8 @@ class GrooveIQ_Trainer(BaseTrainer):
             running_offset_mse += offset_mse.item() * batch_size
             running_vo_penalty += vo_penalty.item() * batch_size
             running_latent_penalty += latent_penalty.item() * batch_size
-            running_kld_loss += kld_loss.item() * batch_size
+            running_kld_loss += kl_loss.item() * batch_size
+            running_adv_loss += adv_loss.item() * batch_size
             running_joint_loss += joint_loss.item() * batch_size
             running_hit_acc += hit_acc * batch_size
             running_hit_ppv += hit_ppv * batch_size
@@ -149,6 +152,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             avg_offset_mse = running_offset_mse / running_sample_count
             avg_latent_penalty = running_latent_penalty / running_sample_count
             avg_kld_loss = running_kld_loss / running_sample_count
+            avg_adv_loss = running_adv_loss / running_sample_count
             avg_vo_penalty = running_vo_penalty / running_sample_count
             avg_joint_loss = running_joint_loss / running_sample_count
             avg_hit_acc = running_hit_acc / running_sample_count
@@ -168,6 +172,7 @@ class GrooveIQ_Trainer(BaseTrainer):
                 vo_penalty=f"{avg_vo_penalty:.4f}",
                 latent_penalty=f"{avg_latent_penalty:.4f}",
                 kld_loss=f"{avg_kld_loss:.4f}",
+                adv_loss=f"{avg_adv_loss:.4f}",
                 joint=f"{avg_joint_loss:.4f}",
                 acc_step=f"{(i % self.config['training']['gradient_accumulation_steps']) + 1}/{self.config['training']['gradient_accumulation_steps']}"
             )
@@ -198,6 +203,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             'offset_mse': running_offset_mse / running_sample_count,
             'latent_penalty': running_latent_penalty / running_sample_count,
             'kld_loss': running_kld_loss / running_sample_count,
+            'adv_loss': running_adv_loss / running_sample_count,
             'vo_penalty': running_vo_penalty / running_sample_count,
             'joint_loss': running_joint_loss / running_sample_count,
         }

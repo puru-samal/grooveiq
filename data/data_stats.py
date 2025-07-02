@@ -97,6 +97,21 @@ class SampleData:
             "midi_bytes": self.midi_bytes,
         }
     
+    @staticmethod
+    def from_dict(data: dict, drum_map: dict = None) -> "SampleData":
+        """Create a sample from a dictionary."""
+        return SampleData(
+            id=data['id'],
+            map=data['map'],
+            style=data['style'],
+            time_signature=data['time_signature'],
+            type=data['type'],
+            metadata=data['metadata'],
+            midi_bytes=data['midi_bytes'],
+            num_bars=data['num_bars'],
+            feature=DrumMIDIFeature(data['midi_bytes']),
+        )
+    
     def dump(self, path: str) -> None:
         """Dump the sample to a MIDI file."""
         with open(path, "w") as f:
