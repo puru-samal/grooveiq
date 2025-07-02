@@ -1,39 +1,45 @@
 from .base_trainer import BaseTrainer
-from data import DrumMIDIFeature
 from typing import Dict, Any, Optional, List
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 import torch.nn.functional as F
+from utils import ConstraintLosses
 from models import GrooveIQ
+import torchaudio.functional as aF
+from data import DrumMIDIFeature
 import matplotlib.pyplot as plt
 import pickle
-from utils import DrumMetrics, RunningAverageMeter
+from sklearn.metrics import precision_recall_curve
+import numpy as np
+import seaborn as sns
+import os
+import wandb
 
 class GrooveIQ_Trainer(BaseTrainer):
     """
-    GrooveIQ Trainer class that handles training, validation, and recognition loops.
-
-    This trainer implements:
-    1. Training loop with gradient accumulation, mixed precision training
-    2. Validation loop for model evaluation
-    3. Recognition capabilities with different decoding strategies (greedy, beam search)
+    IQAE (Implicit Quantization Autoencoder) Trainer class that handles training, validation, and recognition loops.
     """
-    def __init__(self, model : GrooveIQ, config : Dict[str, Any], run_name : str, config_file : str, device : str = None):
+    def __init__(self, model, config, run_name, config_file, device=None):
         super().__init__(model, config, run_name, config_file, device)
         
-        #  Initialize Hit loss
-        self.pos_weight = config['loss'].get('pos_weight', 17.0)
+        #  Loss weights
+        self.pos_weight = config['loss'].get('pos_weight', 1.0)
+        self.hit_penalty = config['loss'].get('hit_penalty', 1.0)
+        self.threshold = config['loss'].get('threshold', 0.5)
+        self.recons_weight = config['loss'].get('recons_weight', 1.0)
+        self.kld_weight = config['loss'].get('kld_weight', 1.0)
+        self.constraint_weight = config['loss'].get('constraint_weight', 0.1)
+        
+        # Loss functions
+        # Reconstruction losses
         self.hit_loss = nn.BCEWithLogitsLoss(reduction='none', pos_weight=torch.tensor(self.pos_weight))
-
-        #  Initialize Velocity loss
         self.velocity_loss = nn.MSELoss(reduction='none')
-
-        #  Initialize Offset loss
         self.offset_loss = nn.MSELoss(reduction='none')
 
-        # Hit penalty
-        self.hit_penalty = config['loss'].get('hit_penalty', 1.0)
+        # Constraint losses
+        self.latent_loss = lambda x: ConstraintLosses().l1_sparsity_time(x)
+        
 
     def set_optimizer(self, optimizer) -> None:
         self.optimizer = optimizer
@@ -52,27 +58,23 @@ class GrooveIQ_Trainer(BaseTrainer):
         self.model.train()
         batch_bar = tqdm(total=len(dataloader), dynamic_ncols=True, leave=False, position=0, desc="[Training IQAE]")
 
-        running_metrics = {
-            "hit_bce": 0.0,
-            "velocity_mse": 0.0,
-            "velocity_mae": 0.0,
-            "velocity_corr": 0.0,
-            "velocity_range_diff": 0.0,
-            "offset_mse": 0.0,
-            "offset_mae": 0.0,
-            "offset_tightness": 0.0,
-            "offset_ahead": 0.0,
-            "offset_behind": 0.0,
-            "velocity_penalty": 0.0,
-            "offset_penalty": 0.0,
-            "joint_loss": 0.0,
-            "hit_acc": 0.0,
-            "hit_ppv": 0.0,
-            "hit_tpr": 0.0,
-            "hit_f1": 0.0,
-            "hit_perplexity": 0.0,
-        }
+        # Initialize accumulators
+        running_latent_penalty = 0.0
+        running_kld_loss = 0.0
+        running_vo_penalty = 0.0
+        running_joint_loss = 0.0
         running_sample_count = 0
+        
+
+        # hit/velocity/offset metrics
+        running_hit_bce = 0.0
+        running_hit_acc = 0.0
+        running_hit_ppv = 0.0
+        running_hit_tpr = 0.0
+        running_hit_f1  = 0.0
+        running_hit_perplexity = 0.0
+        running_velocity_mse   = 0.0
+        running_offset_mse     = 0.0
 
         self.optimizer.zero_grad()
 
@@ -81,47 +83,53 @@ class GrooveIQ_Trainer(BaseTrainer):
             h_true, v_true, o_true = grids[:, :, :, 0], grids[:, :, :, 1], grids[:, :, :, 2]
 
             with torch.autocast(device_type=self.device, dtype=torch.float16):
-                h_logits, v_pred, o_pred, latent, button_hvo, velocity_penalty, offset_penalty = self.model(grids)
+                h_logits, v_pred, o_pred, button_latent, button_hvo, vo_penalty, z, kl_loss, attn_weights = self.model(grids)
 
+                # Hit penalty for penalizing velocity/offset when there is no hit
                 hit_penalty = torch.where(h_true == 1, self.hit_penalty, 0.0)
 
+                # Reconstruction lossses
                 hit_bce = self.hit_loss(h_logits, h_true).mean()
                 velocity_mse = (self.velocity_loss(v_pred, v_true) * hit_penalty).mean()
                 offset_mse = (self.offset_loss(o_pred, o_true) * hit_penalty).mean()
-                
-                joint_loss = hit_bce + velocity_mse + offset_mse + velocity_penalty + offset_penalty
 
-            # Metrics
-            batch_size = grids.size(0)
-            metrics = DrumMetrics.hit_metrics((torch.sigmoid(h_logits) > 0.5).int(), h_true.int())
-            hit_perplexity = DrumMetrics.perplexity(hit_bce)
-            velocity_mae = DrumMetrics.mae_metrics(v_pred, v_true)
-            velocity_corr = DrumMetrics.pearson_corr(v_pred, v_true)
-            velocity_range_diff = DrumMetrics.range_diff(v_pred, v_true)
-            offset_mae = DrumMetrics.mae_metrics(o_pred, o_true)
-            offset_tightness = DrumMetrics.percent_within_tolerance(o_pred, o_true, tolerance=0.02)
-            offset_push_lag = DrumMetrics.ahead_behind_ratio(o_pred, o_true)
+                # Constraint losses
+                latent_penalty = self.latent_loss(button_latent)
+                kld_loss = (kl_loss * self.kld_weight)
+
+                # Joint loss
+                joint_loss = self.recons_weight * (hit_bce + velocity_mse + offset_mse) + \
+                             self.constraint_weight * (vo_penalty + latent_penalty) + \
+                             self.kld_weight * kld_loss
+
+            # Compute hit metrics
+            hit_pred_int = (torch.sigmoid(h_logits) > self.threshold).int()
+            h_true_int = h_true.int()
+            hit_tp = ((hit_pred_int == 1) & (h_true_int == 1)).sum().item()
+            hit_fp = ((hit_pred_int == 1) & (h_true_int == 0)).sum().item()
+            hit_fn = ((hit_pred_int == 0) & (h_true_int == 1)).sum().item()
+            hit_tn = ((hit_pred_int == 0) & (h_true_int == 0)).sum().item()
+            hit_acc = (hit_tp + hit_tn) / (hit_tp + hit_fp + hit_fn + hit_tn) if (hit_tp + hit_fp + hit_fn + hit_tn) > 0 else 0.0
+            hit_ppv = hit_tp / (hit_tp + hit_fp) if (hit_tp + hit_fp) > 0 else 0.0
+            hit_tpr = hit_tp / (hit_tp + hit_fn) if (hit_tp + hit_fn) > 0 else 0.0
+            hit_f1 = (2 * hit_tp) / (2 * hit_tp + hit_fp + hit_fn) if (2 * hit_tp + hit_fp + hit_fn) > 0 else 0.0
+            hit_perplexity = torch.exp(hit_bce).item()
 
             # Accumulate metrics
+            batch_size = grids.size(0)
             running_sample_count += batch_size
-            running_metrics["hit_bce"] += hit_bce.item() * batch_size
-            running_metrics["velocity_mse"] += velocity_mse.item() * batch_size
-            running_metrics["velocity_mae"] += velocity_mae * batch_size
-            running_metrics["velocity_corr"] += velocity_corr * batch_size
-            running_metrics["velocity_range_diff"] += velocity_range_diff * batch_size
-            running_metrics["offset_mse"] += offset_mse.item() * batch_size
-            running_metrics["offset_mae"] += offset_mae * batch_size
-            running_metrics["offset_tightness"] += offset_tightness * batch_size
-            running_metrics["offset_ahead"] += offset_push_lag["ahead"] * batch_size
-            running_metrics["offset_behind"] += offset_push_lag["behind"] * batch_size
-            running_metrics["velocity_penalty"] += velocity_penalty.item() * batch_size
-            running_metrics["offset_penalty"] += offset_penalty.item() * batch_size
-            running_metrics["joint_loss"] += joint_loss.item() * batch_size
-            running_metrics["hit_acc"] += metrics["acc"] * batch_size
-            running_metrics["hit_ppv"] += metrics["ppv"] * batch_size
-            running_metrics["hit_tpr"] += metrics["tpr"] * batch_size
-            running_metrics["hit_f1"] += metrics["f1"] * batch_size
-            running_metrics["hit_perplexity"] += hit_perplexity * batch_size
+            running_hit_bce += hit_bce.item() * batch_size
+            running_velocity_mse += velocity_mse.item() * batch_size
+            running_offset_mse += offset_mse.item() * batch_size
+            running_vo_penalty += vo_penalty.item() * batch_size
+            running_latent_penalty += latent_penalty.item() * batch_size
+            running_kld_loss += kld_loss.item() * batch_size
+            running_joint_loss += joint_loss.item() * batch_size
+            running_hit_acc += hit_acc * batch_size
+            running_hit_ppv += hit_ppv * batch_size
+            running_hit_tpr += hit_tpr * batch_size
+            running_hit_f1 += hit_f1 * batch_size
+            running_hit_perplexity += hit_perplexity * batch_size
 
             # Gradient accumulation
             scaled_loss = joint_loss / self.config['training']['gradient_accumulation_steps']
@@ -134,18 +142,37 @@ class GrooveIQ_Trainer(BaseTrainer):
                 self.scaler.update()
                 self.optimizer.zero_grad()
 
-            # Progress
-            avg_joint_loss = running_metrics["joint_loss"] / running_sample_count
-            avg_hit_acc = running_metrics["hit_acc"] / running_sample_count
-            avg_hit_f1 = running_metrics["hit_f1"] / running_sample_count
+            # Update progress bar
+            avg_hit_bce = running_hit_bce / running_sample_count
+            avg_hit_perplexity = running_hit_perplexity / running_sample_count
+            avg_velocity_mse = running_velocity_mse / running_sample_count
+            avg_offset_mse = running_offset_mse / running_sample_count
+            avg_latent_penalty = running_latent_penalty / running_sample_count
+            avg_kld_loss = running_kld_loss / running_sample_count
+            avg_vo_penalty = running_vo_penalty / running_sample_count
+            avg_joint_loss = running_joint_loss / running_sample_count
+            avg_hit_acc = running_hit_acc / running_sample_count
+            avg_hit_ppv = running_hit_ppv / running_sample_count
+            avg_hit_tpr = running_hit_tpr / running_sample_count
+            avg_hit_f1 = running_hit_f1 / running_sample_count
 
             batch_bar.set_postfix(
-                joint=f"{avg_joint_loss:.4f}",
+                h_bce=f"{avg_hit_bce:.4f}",
                 h_acc=f"{avg_hit_acc:.4f}",
+                h_ppv=f"{avg_hit_ppv:.4f}",
+                h_tpr=f"{avg_hit_tpr:.4f}",
                 h_f1=f"{avg_hit_f1:.4f}",
+                h_perplexity=f"{avg_hit_perplexity:.4f}",
+                v_mse=f"{avg_velocity_mse:.4f}",
+                o_mse=f"{avg_offset_mse:.4f}",
+                vo_penalty=f"{avg_vo_penalty:.4f}",
+                latent_penalty=f"{avg_latent_penalty:.4f}",
+                kld_loss=f"{avg_kld_loss:.4f}",
+                joint=f"{avg_joint_loss:.4f}",
                 acc_step=f"{(i % self.config['training']['gradient_accumulation_steps']) + 1}/{self.config['training']['gradient_accumulation_steps']}"
             )
             batch_bar.update()
+
             # Cleanup
             torch.cuda.empty_cache()
 
@@ -157,14 +184,33 @@ class GrooveIQ_Trainer(BaseTrainer):
             self.scaler.update()
             self.optimizer.zero_grad()
 
-        # Final metrics
-        avg_metrics = {k: v / running_sample_count for k, v in running_metrics.items()}
         batch_bar.close()
-        to_plots = {
-            'samples': samples,         # List of SampleData objects
-            'button_hvo': button_hvo,   # Button HVO corresponding to samples  (B, T, num_buttons, M)
+
+        # Final metrics
+        avg_metrics = {
+            'hit_acc': running_hit_acc / running_sample_count,
+            'hit_ppv': running_hit_ppv / running_sample_count,
+            'hit_tpr': running_hit_tpr / running_sample_count,
+            'hit_f1': running_hit_f1 / running_sample_count,
+            'hit_perplexity': running_hit_perplexity / running_sample_count,
+            'hit_bce': running_hit_bce / running_sample_count,
+            'velocity_mse': running_velocity_mse / running_sample_count,
+            'offset_mse': running_offset_mse / running_sample_count,
+            'latent_penalty': running_latent_penalty / running_sample_count,
+            'kld_loss': running_kld_loss / running_sample_count,
+            'vo_penalty': running_vo_penalty / running_sample_count,
+            'joint_loss': running_joint_loss / running_sample_count,
         }
+
+        # Plotting
+        to_plots = {
+            'samples': samples,          # List of SampleData objects
+            'button_hvo': button_hvo,    # Button HVO corresponding to samples  (B, T, num_buttons, M)
+            'attn_weights': attn_weights # Attention weights (B, T', T')
+        }
+
         return avg_metrics, to_plots
+
 
     def _validate_epoch(self, dataloader, num_batches: Optional[int] = None):
         """
@@ -181,9 +227,10 @@ class GrooveIQ_Trainer(BaseTrainer):
         # Extract references and hypotheses from results
         references = [result['target_grid'] for result in results]
         hypotheses = [result['generated_grid'] for result in results]
+        hit_probs  = [result['hit_probs'] for result in results]
         
-        # Calculate metrics on full batch
-        metrics = self._calculate_metrics(references, hypotheses)
+        # Calculate metrics on num_batches
+        metrics = self._calculate_metrics(references, hypotheses, hit_probs)
         return metrics, results
     
     def train(self, train_dataloader, val_dataloader, epochs: Optional[int] = None):
@@ -195,12 +242,11 @@ class GrooveIQ_Trainer(BaseTrainer):
             val_dataloader: DataLoader for validation data
             epochs: Optional[int], number of epochs to train
         """
-        # Some error handling
         super().train(train_dataloader, val_dataloader)
 
         # Training loop
         best_joint_loss = float('inf')
-        best_hit_acc    = 0.0
+        best_hit_acc    = 0
 
         if epochs is None:
             epochs = self.config['training']['epochs']
@@ -208,12 +254,9 @@ class GrooveIQ_Trainer(BaseTrainer):
         for epoch in range(self.current_epoch, self.current_epoch + epochs):
             
             self.current_epoch += 1
-
-            # Train for one epoch
             train_metrics, train_plots = self._train_epoch(train_dataloader)
-            
-            # Validate
-            val_metrics, val_results = self._validate_epoch(val_dataloader, num_batches=5)
+            val_metrics, val_results = self._validate_epoch(val_dataloader, num_batches=10)
+            self.threshold = val_metrics['optimal_threshold']
 
             # Step ReduceLROnPlateau scheduler with validation loss
             if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -226,13 +269,11 @@ class GrooveIQ_Trainer(BaseTrainer):
             }
             self._log_metrics(metrics, epoch)
 
-            # Generate and save plots
-            self._save_plots(train_plots, val_results, epoch)
-            
-            # Save generated midi
+            # Save plots / midi / checkpoints
+            self._save_midi_plots(train_plots, val_results, epoch)
+            self._save_attention_plot(train_plots['attn_weights']['self_attn'][0], epoch, attn_type="self")
+            self._save_attention_plot(train_plots['attn_weights']['cross_attn'][0], epoch, attn_type="cross")
             self._save_midi(val_results, epoch)
-
-            # Save checkpoints
             self.save_checkpoint('checkpoint-last-epoch-model.pth')
             
             # Check if this is the best model
@@ -240,22 +281,17 @@ class GrooveIQ_Trainer(BaseTrainer):
                 best_hit_acc = val_metrics['hit_acc']
                 self.best_metric = val_metrics['hit_acc']
                 self.save_checkpoint('checkpoint-best-metric-model.pth') 
-                
-    def evaluate(self, dataloader) -> Dict[str, Dict[str, float]]:
+
+    def evaluate(self, test_dataloader, num_batches: Optional[int] = None):
         """
         Evaluate the model on the test set.
-        
-        Args:
-            dataloader: DataLoader for test data
-        Returns:
-            Dictionary containing evaluation metrics and generated results
         """
-        raise NotImplementedError("Not implemented")
+        raise NotImplementedError("Evaluation is not implemented for GrooveIQ")
+                
 
     def generate(self, dataloader, max_length: Optional[int] = None, num_batches: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Evaluate the model by generating transcriptions from audio features.
-        
+        Generate grids from button HVO.
         Args:
             dataloader: DataLoader containing the evaluation data
             max_length: Optional[int], maximum length of the generated sequence
@@ -275,24 +311,17 @@ class GrooveIQ_Trainer(BaseTrainer):
         # Run inference
         with torch.inference_mode():
             for i, batch in enumerate(dataloader):
-                # Get data
-                grids, samples = batch['grid'].to(self.device), batch['samples']
                 
-                # Get latent
-                latent = self.model.encode(grids)
+                grids, samples = batch['grid'].to(self.device), batch['samples']
+                button_latent, z, _ = self.model.encode(grids)
+                button_hvo = self.model.make_button_hvo(button_latent)
+                generated_grids, hit_probs = self.model.generate(button_hvo, z, max_steps=max_length)
 
-                # Get button HVO
-                button_hvo = self.model.make_button_hvo(latent)
-
-                # Generate
-                generated_grids = self.model.generate(button_hvo, max_steps=max_length)
-
-                # Clean up
-                #del grids, latent, button_hvo
                 torch.cuda.empty_cache()
 
-                # TODO: Post process sequences
-                # Convert to Sample objects and calculate some metrics
+                # Post process sequences: 
+                # 1. Convert to Sample objects
+                # 2. Calculate some metrics
                 num_samples = generated_grids.shape[0] # (B)
                 for b in range(num_samples):
                     target_sample = samples[b]
@@ -305,7 +334,8 @@ class GrooveIQ_Trainer(BaseTrainer):
                         'generated_grid': generated_grid,
                         'target_sample': target_sample,
                         'target_grid': target_grid,
-                        "button_hvo": button_hvo[b, :, :, :].cpu().detach(),
+                        'hit_probs': hit_probs[b, :, :].cpu().detach(),
+                        'button_hvo': button_hvo[b, :, :, :].cpu().detach()
                     })
                 
                 # Update progress bar
@@ -317,60 +347,106 @@ class GrooveIQ_Trainer(BaseTrainer):
             return results
 
         
-    def _calculate_metrics(self, references: List[torch.tensor], hypotheses: List[torch.tensor]) -> Dict[str, float]:
+    def _calculate_metrics(self, references: List[torch.tensor], hypotheses: List[torch.tensor], hit_probs: List[torch.tensor]) -> Dict[str, float]:
         """
         Calculate metrics for grids.
         
         Args:
             references: List of reference grid(s) where each grid is of shape (T, E, 3)
             hypotheses: List of hypothesis grid(s) where each grid is of shape (T', E, 3)
+            hit_probs: List of hit probabilities where each tensor is of shape (T', E)
         Returns:
             Dictionary of metrics
         """
-        hit_acc = hit_ppv = hit_tpr = hit_f1 = 0.0
-        velocity_mse = velocity_mae = velocity_corr = velocity_range_diff = 0.0
-        offset_mse = offset_mae = offset_tightness = offset_ahead = offset_behind = 0.0
+        hit_acc = 0.0
+        hit_ppv = 0.0
+        hit_tpr = 0.0
+        hit_f1 = 0.0
+        velocity_mse = 0.0
+        offset_mse = 0.0
 
-        for ref, hyp in zip(references, hypotheses):
-            metrics = DrumMetrics.hit_metrics(hyp[:, :, 0].int(), ref[:, :, 0].int())
-            hit_acc += metrics["acc"]
-            hit_ppv += metrics["ppv"]
-            hit_tpr += metrics["tpr"]
-            hit_f1  += metrics["f1"]
+        # Store all hit probs and ground truths
+        all_probs = []
+        all_labels = []
 
-            v_ref, v_hyp = ref[:, :, 1], hyp[:, :, 1]
-            velocity_mse += DrumMetrics.mse_metrics(v_hyp, v_ref)
-            velocity_mae += DrumMetrics.mae_metrics(v_hyp, v_ref)
-            velocity_corr += DrumMetrics.pearson_corr(v_hyp, v_ref)
-            velocity_range_diff += DrumMetrics.range_diff(v_hyp, v_ref)
+        for reference, hypothesis, hit_prob in zip(references, hypotheses, hit_probs):
 
-            o_ref, o_hyp = ref[:, :, 2], hyp[:, :, 2]
-            offset_mse += DrumMetrics.mse_metrics(o_hyp, o_ref)
-            offset_mae += DrumMetrics.mae_metrics(o_hyp, o_ref)
-            offset_tightness += DrumMetrics.percent_within_tolerance(o_hyp, o_ref)
-            offset_push_lag = DrumMetrics.ahead_behind_ratio(o_hyp, o_ref)
-            offset_ahead += offset_push_lag["ahead"]
-            offset_behind += offset_push_lag["behind"]
+            hit_pred_int = (hit_prob > self.threshold).int()
+            h_true_int   = reference[:, :, 0].int()
 
-        N = len(references)
-        metrics_dict = {
-            'hit_acc': hit_acc / N,
-            'hit_ppv': hit_ppv / N,
-            'hit_tpr': hit_tpr / N,
-            'hit_f1': hit_f1 / N,
-            'velocity_mse': velocity_mse / N,
-            'velocity_mae': velocity_mae / N,
-            'velocity_corr': velocity_corr / N,
-            'velocity_range_diff': velocity_range_diff / N,
-            'offset_mse': offset_mse / N,
-            'offset_mae': offset_mae / N,
-            'offset_tightness': offset_tightness / N,
-            'offset_ahead': offset_ahead / N,
-            'offset_behind': offset_behind / N,
+            all_probs.append(hit_prob.flatten().cpu().numpy())
+            all_labels.append(h_true_int.flatten().cpu().numpy())
+
+            hit_tp = ((hit_pred_int == 1) & (h_true_int == 1)).sum().item() # True positives
+            hit_fp = ((hit_pred_int == 1) & (h_true_int == 0)).sum().item()
+            hit_fn = ((hit_pred_int == 0) & (h_true_int == 1)).sum().item()
+            hit_tn = ((hit_pred_int == 0) & (h_true_int == 0)).sum().item()
+
+            total = hit_tp + hit_fp + hit_fn + hit_tn
+            hit_acc += (hit_tp + hit_tn) / total if total > 0 else 0.0
+            hit_ppv += hit_tp / (hit_tp + hit_fp) if (hit_tp + hit_fp) > 0 else 0.0
+            hit_tpr += hit_tp / (hit_tp + hit_fn) if (hit_tp + hit_fn) > 0 else 0.0
+            hit_f1  += (2 * hit_tp) / (2 * hit_tp + hit_fp + hit_fn) if (2 * hit_tp + hit_fp + hit_fn) > 0 else 0.0
+            
+            velocity_mse += F.mse_loss(reference[:, :, 1], hypothesis[:, :, 1]).item()
+            offset_mse += F.mse_loss(reference[:, :, 2], hypothesis[:, :, 2]).item()
+
+        hit_acc /= len(references)
+        hit_ppv /= len(references)
+        hit_tpr /= len(references)
+        hit_f1  /= len(references)
+        velocity_mse /= len(references)
+        offset_mse /= len(references)
+
+        # Flatten all probs and labels
+        all_probs = np.concatenate(all_probs)
+        all_labels = np.concatenate(all_labels)
+
+        # Compute PR curve
+        precision, recall, thresholds = precision_recall_curve(all_labels, all_probs)
+
+        # Compute F1 at each threshold
+        f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
+        best_idx = np.argmax(f1_scores)
+        best_threshold = thresholds[best_idx] if best_idx < len(thresholds) else 0.5  # safety fallback
+
+        # Additional optional: best overall F1 at best threshold
+        best_f1 = f1_scores[best_idx]
+        best_ppv = precision[best_idx]
+        best_tpr = recall[best_idx]
+
+        return {
+            'hit_acc': hit_acc,
+            'hit_ppv': hit_ppv,
+            'hit_tpr': hit_tpr,
+            'hit_f1': hit_f1,
+            'velocity_mse': velocity_mse,
+            'offset_mse': offset_mse,
+            'optimal_threshold': float(best_threshold),
+            'optimal_f1': float(best_f1),
+            'optimal_ppv': float(best_ppv),
+            'optimal_tpr': float(best_tpr),
         }
-        return metrics_dict
     
-    def _save_plots(self, train_plots, val_results, epoch, num_samples: int = 3):
+    def _save_attention_plot(self, attn_weights: torch.Tensor, epoch: int, attn_type: str = "self"):
+        """Save attention weights visualization."""
+        if isinstance(attn_weights, torch.Tensor):
+            attn_weights = attn_weights.cpu().detach().numpy()
+        
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(attn_weights, cmap="viridis", cbar=True)
+        plt.title(f"Attention Weights - Epoch {epoch}")
+        plt.xlabel("Source Sequence")
+        plt.ylabel("Target Sequence")
+        
+        plot_path = os.path.join(self.attn_dir, f"{attn_type}_attention_epoch{epoch}.png")
+        plt.savefig(plot_path)
+        plt.close()
+        
+        if self.use_wandb:
+            wandb.log({f"{attn_type}_attention": wandb.Image(plot_path)}, step=epoch)
+    
+    def _save_midi_plots(self, train_plots, val_results, epoch, num_samples: int = 3):
         """
         Save plots for training and validation
         Args:
@@ -388,7 +464,7 @@ class GrooveIQ_Trainer(BaseTrainer):
         plots_dir = self.expt_root / 'plots'
         plots_dir.mkdir(exist_ok=True)
 
-        # Plot Training Grid Plot + Button HVO
+        # TODO: Plot Training Grid Plot + Button HVO
         fig1, axes1 = plt.subplots(min(num_samples, len(train_plots['samples'])), 2, figsize=(15, 5*min(num_samples, len(train_plots['samples']))))
         fig2, axes2 = plt.subplots(min(num_samples, len(val_results)), 2, figsize=(15, 5*min(num_samples, len(val_results))))
 
@@ -456,7 +532,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             results.append({
                 'generated_sample': result['generated_sample'].to_dict(),
                 'target_sample': result['target_sample'].to_dict(),
-                'button_hvo': result['button_hvo'],
+                'button_hvo': result['button_hvo'].cpu().detach(),
             })
         
         with open(midi_dir / f"val_results_{epoch}.pkl", "wb") as f:
