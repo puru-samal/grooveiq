@@ -373,10 +373,7 @@ class GrooveIQ_Trainer(BaseTrainer):
 
             hit_pred_int = (hit_prob > self.threshold).int()
             h_true_int   = reference[:, :, 0].int()
-
-            all_probs.append(hit_prob.flatten().cpu().numpy())
-            all_labels.append(h_true_int.flatten().cpu().numpy())
-
+            
             hit_tp = ((hit_pred_int == 1) & (h_true_int == 1)).sum().item() # True positives
             hit_fp = ((hit_pred_int == 1) & (h_true_int == 0)).sum().item()
             hit_fn = ((hit_pred_int == 0) & (h_true_int == 1)).sum().item()
@@ -387,6 +384,9 @@ class GrooveIQ_Trainer(BaseTrainer):
             hit_ppv += hit_tp / (hit_tp + hit_fp) if (hit_tp + hit_fp) > 0 else 0.0
             hit_tpr += hit_tp / (hit_tp + hit_fn) if (hit_tp + hit_fn) > 0 else 0.0
             hit_f1  += (2 * hit_tp) / (2 * hit_tp + hit_fp + hit_fn) if (2 * hit_tp + hit_fp + hit_fn) > 0 else 0.0
+
+            all_probs.append(hit_prob.flatten().cpu().numpy())
+            all_labels.append(h_true_int.flatten().cpu().numpy())
             
             velocity_mse += F.mse_loss(reference[:, :, 1], hypothesis[:, :, 1]).item()
             offset_mse += F.mse_loss(reference[:, :, 2], hypothesis[:, :, 2]).item()
