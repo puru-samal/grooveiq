@@ -327,7 +327,11 @@ class GrooveIQ_Trainer(BaseTrainer):
                     target_sample = samples[b]
                     target_grid = grids[b, :, :, :] # (T, E, 3)
                     generated_grid = generated_grids[b, 1:, :, :] # Drop SOS token, (T', E, 3)
-                    generated_sample = samples[b].from_fixed_grid(generated_grid, steps_per_quarter=self.config['data']['steps_per_quarter'])
+                    try:
+                        generated_sample = samples[b].from_fixed_grid(generated_grid, steps_per_quarter=self.config['data']['steps_per_quarter'])
+                    except Exception as e:
+                        print(f"Error generating sample: {e}")
+                        generated_sample = None
                     
                     results.append({
                         'generated_sample': generated_sample,
