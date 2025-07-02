@@ -99,8 +99,8 @@ class GrooveIQ_Trainer(BaseTrainer):
 
                 # Joint loss
                 joint_loss = self.recons_weight * (hit_bce + velocity_mse + offset_mse) + \
-                             self.constraint_weight * (vo_penalty + latent_penalty) + \
-                             self.kld_weight * kld_loss
+                             self.constraint_weight * latent_penalty + \
+                             self.kld_weight * kld_loss + vo_penalty
 
             # Compute hit metrics
             hit_pred_int = (torch.sigmoid(h_logits) > self.threshold).int()
