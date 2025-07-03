@@ -56,7 +56,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             Tuple[Dict[str, float], Dict[str, Any]]: Average metrics and data to plot
         """
         self.model.train()
-        batch_bar = tqdm(total=len(dataloader), dynamic_ncols=True, leave=False, position=0, desc="[Training IQAE]")
+        batch_bar = tqdm(total=len(dataloader), dynamic_ncols=True, leave=False, position=0, desc="[Training GrooveIQ]")
 
         # Initialize accumulators
         running_latent_penalty = 0.0
@@ -81,6 +81,8 @@ class GrooveIQ_Trainer(BaseTrainer):
 
         for i, batch in enumerate(dataloader):
             grids, samples, labels = batch['grid'].to(self.device), batch['samples'], batch['labels']
+            if labels is not None:
+                labels = labels.float().to(self.device)
             h_true, v_true, o_true = grids[:, :, :, 0], grids[:, :, :, 1], grids[:, :, :, 2]
 
             with torch.autocast(device_type=self.device, dtype=torch.float16):

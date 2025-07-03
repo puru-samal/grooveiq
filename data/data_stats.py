@@ -86,6 +86,7 @@ class SampleData:
             midi_bytes=feature_segment.score.dumps_midi(),
             num_bars=num_bars,
             feature=feature_segment,
+            descriptors=FeatureDescriptors(feature_segment),
         )
     
     def to_dict(self) -> dict:
@@ -104,6 +105,7 @@ class SampleData:
     @staticmethod
     def from_dict(data: dict, drum_map: dict = None) -> "SampleData":
         """Create a sample from a dictionary."""
+        feature = DrumMIDIFeature(data['midi_bytes'])
         return SampleData(
             id=data['id'],
             map=data['map'],
@@ -113,7 +115,8 @@ class SampleData:
             metadata=data['metadata'],
             midi_bytes=data['midi_bytes'],
             num_bars=data['num_bars'],
-            feature=DrumMIDIFeature(data['midi_bytes']),
+            feature=feature,
+            descriptors=FeatureDescriptors(feature),
         )
     
     def dump(self, path: str) -> None:
