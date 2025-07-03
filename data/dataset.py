@@ -124,7 +124,8 @@ class DrumMIDIDataset(Dataset):
 
         return {
             'grid': torch.stack(padded_grids),  # (B, T_max, E, M)
-            'samples': list(samples)
+            'samples': list(samples),
+            'labels': None # TODO: Add features
         }
 
 
