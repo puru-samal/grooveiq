@@ -59,6 +59,7 @@ class GrooveIQ(nn.Module):
         self.is_velocity_quantized = num_bins_velocity > 0
         self.is_offset_quantized   = num_bins_offset > 0
 
+        self.sos_token = nn.Parameter(torch.randn(1, E, M))
         self.pos_emb   = PositionalEncoding(embed_dim, T)
         self.encoder   = DrumAxialTransformer(
                                 T=T, E=E, M=M, embed_dim=embed_dim, 
@@ -71,10 +72,9 @@ class GrooveIQ(nn.Module):
         self.attn_proj_instr   = nn.Linear(embed_dim, 1)
         self.time_attn_proj    = nn.Linear(embed_dim, 1)
         self.button_projection = nn.Linear(embed_dim, num_buttons * M) # (B, T, D) -> (B, T, num_buttons * M)
-        self.z_to_token_proj   = nn.Linear(z_dim, E * M)               # (B, z_dim) -> (B, E * M)
 
         self.dec_inp_proj      = nn.Linear(E * M, embed_dim) # (B, T', E*M) -> (B, T', D)
-        self.dec_button_proj   = nn.Linear(num_buttons * M, embed_dim) # (B, T', num_buttons*M) -> (B, T', D)
+        self.dec_button_proj   = nn.Linear(z_dim + num_buttons * M, embed_dim) # (B, T', z_dim + num_buttons*M) -> (B, T', D)
         
         self.decoder = nn.TransformerDecoder(
             decoder_layer = TransformerDecoderLayer(d_model=embed_dim, nhead=decoder_heads, batch_first=True, norm_first=True),
@@ -186,14 +186,18 @@ class GrooveIQ(nn.Module):
         num_buttons = self.num_buttons
 
         # Target
-        target_sos = self.z_to_token_proj(z).unsqueeze(1).view(B, 1, E, M) # (B, 1, E, M)
-        target = torch.cat([target_sos, input[:, :-1, :, :]], dim=1) # (B, T', E, M)
+        target = torch.cat([self.sos_token.unsqueeze(0).repeat(B, 1, 1, 1), input[:, :-1, :, :]], dim=1) # (B, T', E, M)
         target = self.dec_inp_proj(target.view(B, T, E * M)) # (B, T', D)
         target = self.pos_emb(target) # (B, T', D)
         target_causal_mask = CausalMask(target) # (T', T')
         
         button_hit_mask = (~(button_hvo[:, :, :, 0].sum(dim=-1) == 0)).float().unsqueeze(-1)     # (B, T, 1)
-        memory = self.dec_button_proj(button_hvo.view(B, T, num_buttons * M) * button_hit_mask)  # (B, T', D)
+        combined_latent = torch.cat(
+            [
+                z.unsqueeze(1).expand(-1, T, -1), 
+                button_hvo.view(B, T, num_buttons * M) * button_hit_mask
+            ], dim=2) # (B, T, z_dim + num_buttons * M)
+        memory = self.dec_button_proj(combined_latent)  # (B, T', D)
         memory = self.pos_emb(memory) # (B, T', D)
         memory_causal_mask = CausalMask(memory) # (T', T')
 
@@ -296,7 +300,7 @@ class GrooveIQ(nn.Module):
         E = self.E
         T_gen = max_steps or T
 
-        generated = self.z_to_token_proj(z).unsqueeze(1).view(B, 1, E, M) # (B, 1, E * M)
+        generated = self.sos_token.unsqueeze(0).repeat(B, 1, 1, 1) # (B, 1, E, M)
         hit_probs = []
         button_hit_mask = (~(button_hvo[:, :, :, 0].sum(dim=-1) == 0)).float().unsqueeze(-1) # (B, T, 1)
         for t in range(T_gen):
@@ -306,8 +310,13 @@ class GrooveIQ(nn.Module):
             tgt_embed_pos = self.pos_emb(tgt_embed)
             
             # Memory
-            button_latent = button_hvo[:, :t + 1].view(B, t + 1, num_buttons * M) * button_hit_mask[:, :t + 1, :] # (B, T, num_buttons * M)
-            mem_embed = self.dec_button_proj(button_latent) # (B, T, D)
+            combined_latent = torch.cat(
+                [
+                    z.unsqueeze(1).expand(-1, t + 1, -1), 
+                    button_hvo[:, :t + 1].view(B, t + 1, num_buttons * M) * button_hit_mask[:, :t + 1, :]
+                ], dim=2
+            ) # (B, T, z_dim + num_buttons * M)
+            mem_embed = self.dec_button_proj(combined_latent) # (B, T, D)
             mem_embed_pos = self.pos_emb(mem_embed)
             
             # Mask
