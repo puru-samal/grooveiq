@@ -95,10 +95,12 @@ class DrumMIDIDataset(Dataset):
 
         if self.feature_type == "fixed":
             grid, _ = sample.feature.to_fixed_grid(steps_per_quarter=self.steps_per_quarter)
-            return sample, grid
+            desc_label, _ = sample.descriptors.get_feature_vector()
+            return sample, grid, desc_label
         elif self.feature_type == "flexible":
             grid, _ = sample.feature.to_flexible_grid(max_hits_per_class=self.data_stats.max_hits_per_class, steps_per_quarter=self.steps_per_quarter)
-            return sample, grid
+            desc_label, _ = sample.descriptors.get_feature_vector()
+            return sample, grid, desc_label
         
     
     
@@ -112,7 +114,7 @@ class DrumMIDIDataset(Dataset):
                 - 'samples': List of SampleData
                 - 'stats': List of stats
         """
-        samples, grids = zip(*batch)
+        samples, grids, desc_labels = zip(*batch)
         T_max = max(g.shape[0] for g in grids)
         E, M = grids[0].shape[1:]
 
@@ -125,7 +127,7 @@ class DrumMIDIDataset(Dataset):
         return {
             'grid': torch.stack(padded_grids),  # (B, T_max, E, M)
             'samples': list(samples),
-            'labels': None # TODO: Add features
+            'labels': torch.stack(desc_labels)
         }
 
 

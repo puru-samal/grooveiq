@@ -10,6 +10,7 @@ import itertools
 from .feature import DrumMIDIFeature
 from .utils import get_num_bars
 from .drum_maps import CANONICAL_DRUM_MAP
+from .descriptors import FeatureDescriptors
 import torch
 from tqdm import tqdm
 
@@ -25,6 +26,7 @@ class SampleData:
     midi_bytes: bytes
     num_bars: int
     feature: DrumMIDIFeature
+    descriptors: FeatureDescriptors
 
     def __str__(self) -> str:
         return f"SampleData(id={self.id}, map={self.map}, style={self.style}, time_signature={self.time_signature}, type={self.type}, metadata={self.metadata}, num_bars={self.num_bars})"
@@ -47,6 +49,7 @@ class SampleData:
             midi_bytes=feature.score.dumps_midi(),
             num_bars=num_bars,
             feature=feature,
+            descriptors=FeatureDescriptors(feature),
         )
     
     def split_segments(self, num_bars: int) -> Tuple[List["SampleData"], int]:
@@ -65,6 +68,7 @@ class SampleData:
                 midi_bytes=segment.score.dumps_midi(),
                 num_bars=get_num_bars(duration=segment.end, time_signature=time_signature, tpq=segment.score.tpq),
                 feature=segment,
+                descriptors=FeatureDescriptors(segment),
             ) for segment in segments
         ], num_errors
 
@@ -245,6 +249,7 @@ class DataStats:
             midi_bytes=data['midi_bytes'],
             num_bars=num_bars,
             feature=feature,
+            descriptors=FeatureDescriptors(feature),
         ))
 
     def get_pos_neg_counts(self, steps_per_quarter: int) -> Tuple[int, int]:
