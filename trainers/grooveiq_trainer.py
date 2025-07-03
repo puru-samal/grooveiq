@@ -213,6 +213,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             'offset_mse': running_offset_mse / running_sample_count,
             'latent_penalty': running_latent_penalty / running_sample_count,
             'kld_loss': running_kld_loss / running_sample_count,
+            'sup_loss': running_sup_loss / running_sample_count,
             'vo_penalty': running_vo_penalty / running_sample_count,
             'joint_loss': running_joint_loss / running_sample_count,
         }
