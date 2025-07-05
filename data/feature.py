@@ -632,6 +632,8 @@ class DrumMIDIFeature:
         Args:
             button_hvo: DrumMIDIFeature object
             fs: Sample rate for synthesis.
+        Returns:
+            audio_data: Audio data (np.ndarray of shape (samples, 2))
         """
         
         if not _HAS_SOUNDDEVICE:
@@ -648,6 +650,7 @@ class DrumMIDIFeature:
         audio_data = render(shifted_score, self.sf_path, fs)
         sd.play(audio_data, fs)
         sd.wait()
+        return audio_data
 
     
     #########################################################################################
@@ -660,6 +663,8 @@ class DrumMIDIFeature:
 
         Args:
             fs: Sample rate for synthesis.
+        Returns:
+            audio_data: Audio data (np.ndarray of shape (samples, 2))
         """
         if not _HAS_SOUNDDEVICE:
             print("sounddevice not found, will not be able to play audio")
@@ -667,6 +672,7 @@ class DrumMIDIFeature:
         audio_data = render(self.score, self.sf_path, fs)
         sd.play(audio_data, fs)
         sd.wait()
+        return audio_data
 
     def fixed_grid_plot(self, ax: Optional[plt.Axes] = None, steps_per_quarter: int = 4) -> Tuple[plt.Figure, plt.Axes]:
         """

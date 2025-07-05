@@ -38,7 +38,8 @@ class GrooveIQ_Trainer(BaseTrainer):
         self.offset_loss   = nn.MSELoss(reduction='none')
 
         # Constraint losses
-        self.latent_loss = lambda x: ConstraintLosses().l1_sparsity_time(x)
+        #self.latent_loss = lambda x: ConstraintLosses().l1_sparsity_time(x)
+        self.latent_loss = lambda x: ConstraintLosses().l2_sparsity(x)
         
 
     def set_optimizer(self, optimizer) -> None:
