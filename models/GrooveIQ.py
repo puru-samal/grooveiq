@@ -238,7 +238,7 @@ class GrooveIQ(nn.Module):
             h_logits: Tensor of shape (B, T, E)
             v: Tensor of shape (B, T, E)
             o: Tensor of shape (B, T, E)
-            button_latent: Tensor of shape (B, T, num_buttons * M)
+            button_latent: Tensor of shape (B, T, num_button, M)
             button_hvo: Tensor of shape (B, T, num_buttons, M)
             velocity_penalty: Tensor of shape (B)
             offset_penalty: Tensor of shape (B)
@@ -274,7 +274,7 @@ class GrooveIQ(nn.Module):
                 'h_logits': h_logits, 
                 'v': v, 
                 'o': o, 
-                'button_latent': button_latent.view(button_latent.size(0), button_latent.size(1), -1), 
+                'button_latent': button_latent, 
                 'button_hvo': button_hvo, 
                 'attn_weights': attn_weights, 
                 'vo_penalty': vo_penalty, 
