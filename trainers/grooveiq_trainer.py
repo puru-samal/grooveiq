@@ -38,9 +38,19 @@ class GrooveIQ_Trainer(BaseTrainer):
         self.offset_loss   = nn.MSELoss(reduction='none')
 
         # Constraint losses
-        #self.latent_loss = lambda x: ConstraintLosses().l1_sparsity_time(x)
-        self.latent_loss = lambda x: ConstraintLosses().l2_sparsity_time(x)
-        
+        latent_loss_type = self.config['loss'].get('latent_loss_type', 'l1_temporal_diff')
+        print(f"Using latent loss type: {latent_loss_type}")
+        if latent_loss_type == 'l1_temporal_diff':
+            self.latent_loss = lambda x: ConstraintLosses().l1_temporal_diff(x)
+        elif latent_loss_type == 'l2_temporal_diff':
+            self.latent_loss = lambda x: ConstraintLosses().l2_temporal_diff(x)
+        elif latent_loss_type == 'group_sparse_temporal_diff':
+            self.latent_loss = lambda x: ConstraintLosses().group_sparse_temporal_diff(x)
+        elif latent_loss_type == 'l1_sparsity_time':
+            self.latent_loss = lambda x: ConstraintLosses().l1_sparsity_time(x)
+        elif latent_loss_type == 'l2_sparsity_time':
+            self.latent_loss = lambda x: ConstraintLosses().l2_sparsity_time(x)
+
 
     def set_optimizer(self, optimizer) -> None:
         self.optimizer = optimizer
