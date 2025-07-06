@@ -53,7 +53,7 @@ class ConstraintLosses(nn.Module):
         """
         return self._reduce(torch.norm(z, p=1, dim=-1))
     
-    def l2_sparsity(self, z):
+    def l2_sparsity_time(self, z):
         """
         L2 sparsity penalty directly on z to encourage sparsity in activations.
         """
