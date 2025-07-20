@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import torch
 from typing import List, Dict, Tuple, Optional
 from collections import defaultdict
-import math
+import random
 import pretty_midi
 
 """
@@ -38,7 +38,7 @@ feature_from_grid.play()
 
 class DrumMIDIFeature:
     """
-    Feature extraction and audio rendering for a single Groove MIDI file.
+    Feature extraction and audio rendering for a single Drum MIDI file.
 
     Attributes:
         score (Score): The parsed MIDI score.
@@ -320,6 +320,22 @@ class DrumMIDIFeature:
         score_cpy.clip(start_time, end_time, clip_end=True, inplace=True)
         score_cpy.shift_time(-start_time, inplace=True)
         return DrumMIDIFeature.from_score(score_cpy)
+    
+    def _get_group(self, pitch: int) -> int:
+        """
+        Get the group of a pitch.
+        """
+        low_pitches = [36, 43] # kick, low_tom
+        medium_pitches = [38, 47, 50] # snare, mid_tom, high_tom
+        high_pitches = [42, 46, 49, 51] # hh_closed, hh_open, crash, ride
+        if pitch in low_pitches:
+            return 0
+        elif pitch in medium_pitches:
+            return 1
+        elif pitch in high_pitches:
+            return 2
+        else:
+            raise ValueError(f"Pitch {pitch} not found in any group.")
 
     #########################################################################################
     # Fixed grid methods
@@ -375,8 +391,12 @@ class DrumMIDIFeature:
 
             # Update cell with this (stronger) note
             grid[t, index] = torch.tensor([1.0, velocity, offset])
+
+        reorder_idx = [0, 4, 1, 5, 6, 2, 3, 7, 8] # [[low], [mid], [high]]
+        grid = grid[:, reorder_idx, :]
         
         return grid.float(), stats
+    
     
     def from_fixed_grid(self, grid: torch.Tensor, steps_per_quarter: int) -> "DrumMIDIFeature":
         """
@@ -389,6 +409,8 @@ class DrumMIDIFeature:
         Returns:
             DrumMIDIFeature instance
         """
+        reorder_idx = [0, 2, 5, 6, 1, 3, 4, 7, 8]
+        grid = grid[:, reorder_idx, :]
         T, E, M = grid.shape
         score = self.score.copy()
         track = score.tracks[0]
@@ -420,7 +442,149 @@ class DrumMIDIFeature:
         score.tracks[0] = track
         return DrumMIDIFeature.from_score(score)
     
+    def simplify_fixed_grid(self, win_size: int = 2, velocity_threshold: float = 0.5, max_hits_per_win: int = 1, retain_prob: float = 0.8) -> torch.Tensor:
+        """
+        Simplifies a (T, E, 3) HVO grid by selecting up to `max_hits_per_window` strongest hits per window,
+        applying thresholding and random retention.
+        
+        Args:
+            fixed_grid (Tensor): (T, E, 3) drum sequence (hit, velocity, offset)
+            win_size (int): window size in timesteps (e.g. 2 = 1/8th note if 1/16 resolution)
+            velocity_threshold (float): minimum velocity to consider a hit "real"
+            max_hits_per_window (int): max hits to keep per window (randomized)
+            retain_prob (float): probability to keep any given window (to allow full zeroing)
 
+        Returns:
+            Tensor: (T, E, 3) simplified grid
+        """
+        fixed_grid, _ = self.to_fixed_grid(steps_per_quarter=4)
+        T, E, M = fixed_grid.shape
+        out_grid = torch.zeros_like(fixed_grid)
+
+        for i in range(0, T, win_size):
+            slice = fixed_grid[i:i+win_size]  # shape: (win_size, E, 3)
+
+            if slice.shape[0] < win_size:
+                continue  # skip incomplete window at end
+
+            # Get velocities and apply threshold
+            velocity_slice = slice[:, :, 1]  # shape: (win_size, E)
+            mask = velocity_slice > velocity_threshold
+
+            if not mask.any():
+                continue  # skip empty window
+
+            # Flatten valid indices
+            valid_indices = mask.nonzero(as_tuple=False)  # shape: (N_valid, 2), with (t, e)
+
+            # Randomly choose to keep this window
+            if random.random() > retain_prob:
+                continue  # drop entire window randomly
+
+            # Determine how many hits to keep (could be 1 or up to max_hits_per_window)
+            k = random.randint(1, max_hits_per_win)
+            if k > len(valid_indices):
+                k = len(valid_indices)
+
+            # Rank valid hits by velocity
+            velocities = velocity_slice[mask]  # 1D tensor
+            topk = torch.topk(velocities, k)
+            selected_indices = valid_indices[topk.indices]  # shape: (k, 2)
+
+            for t_rel, e in selected_indices:
+                out_grid[i + t_rel, e] = slice[t_rel, e]  # copy full HVO
+
+        return out_grid
+    
+    def reduce_groove_fixed_grid(self, velocity_threshold=0.4):
+        """
+        Reduces a fixed-grid HVO representation by removing ornamental hits based on metrical salience.
+        Assumes 1/16th resolution for 4/4 time.
+
+        Args:
+            grid (Tensor): (T, E, 3) input grid [hit, velocity, offset]
+            velocity_threshold (float): Minimum velocity to retain a note
+
+        Returns:
+            Tensor: Reduced grid (T, E, 3), with ornamental hits removed or shifted
+        """
+        grid, _ = self.to_fixed_grid(steps_per_quarter=4)
+
+        pattern = torch.tensor([0, -2, -1, -2], device=grid.device)
+        repeats = (grid.shape[0] + len(pattern) - 1) // len(pattern)  # ceil division
+
+        metrical_profile = pattern.repeat(repeats)[:grid.shape[0]]  # Trim to T
+        reduced_grid = grid.clone()
+
+        T, E, _ = grid.shape
+
+        for e in range(E):
+            part = reduced_grid[:, e, :]  # shape: (T, 3)
+            velocity = part[:, 1]
+
+            # Step 1: Remove ghost notes
+            part[velocity <= velocity_threshold] = 0.0
+
+            for i in range(T):
+                if part[i, 0] != 0:  # there's a hit
+                    for k in range(max(0, i - 3), i):
+                        if part[k, 0] != 0 and metrical_profile[k] < metrical_profile[i]:
+                            # Find strongest prior pulse before k
+                            prev = 0
+                            for l in range(k):
+                                if part[l, 0] != 0:
+                                    prev = l
+
+                            m_strength = metrical_profile[prev:k].max()
+                            if m_strength <= metrical_profile[k]:
+                                # Density transform: remove k
+                                part[k] = 0.0
+                            else:
+                                # Figural shift: move k to stronger m
+                                m_idx = prev + torch.argmax(metrical_profile[prev:k])
+                                part[m_idx] = part[k]
+                                part[k] = 0.0
+
+                if part[i, 0] == 0:
+                    for k in range(max(0, i - 3), i):
+                        if part[k, 0] != 0 and metrical_profile[k] < metrical_profile[i]:
+                            # Syncopation correction
+                            part[i] = part[k]
+                            part[k] = 0.0
+
+            reduced_grid[:, e, :] = part
+
+        return reduced_grid
+    
+    def to_button_hvo(self, steps_per_quarter: int = 4, num_buttons: int = 3) -> Tuple[torch.Tensor, Dict]:
+        """
+        Convert a fixed grid to a button HVO grid.
+        """
+        grid, _ = self.to_fixed_grid(steps_per_quarter=steps_per_quarter)
+        T, E, M = grid.shape
+        button_hvo = torch.zeros((T, num_buttons, 3))
+        button_map = {
+            0: [0, 1],       # low
+            1: [2, 3, 4],    # mid
+            2: [5, 6, 7, 8], # high
+        }
+
+        inv_button_map = {v: k for k, V in button_map.items() for v in V}
+
+        # Get the number of hits per button
+        for t in range(T):
+            for e in range(E):
+                hit, velocity, offset = grid[t, e].tolist()
+                if hit > 0:
+                    button_e = inv_button_map[e]
+                    if button_hvo[t, button_e, 1] < velocity and button_e < num_buttons:
+                        button_hvo[t, button_e] = torch.tensor([1.0, velocity, offset])
+        return button_hvo.float()
+    
+    #########################################################################################
+    # Token sequence methods
+    #########################################################################################
+    
     def to_token_sequence(self, steps_per_quarter: int = 4) -> Tuple[torch.Tensor, Dict]:
         """
         Convert a full MIDI performance into a token sequence.
@@ -473,22 +637,6 @@ class DrumMIDIFeature:
             track.notes.append(note)
         
         return DrumMIDIFeature.from_score(score)
-
-    def _get_group(self, pitch: int) -> int:
-        """
-        Get the group of a pitch.
-        """
-        low_pitches = [36, 43] # kick, low_tom
-        medium_pitches = [38, 47, 50] # snare, mid_tom, high_tom
-        high_pitches = [42, 46, 49, 51] # hh_closed, hh_open, crash, ride
-        if pitch in low_pitches:
-            return 0
-        elif pitch in medium_pitches:
-            return 1
-        elif pitch in high_pitches:
-            return 2
-        else:
-            raise ValueError(f"Pitch {pitch} not found in any group.")
     
     #########################################################################################
     # Flexible grid methods
@@ -805,14 +953,37 @@ if __name__ == "__main__":
 
     import pickle
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    test_path = os.path.join(project_root, "dataset", "serialized", "50sAutumn.pkl")
+    test_path = os.path.join(project_root, "dataset", "serialized", "80sBlack.pkl")
     with open(test_path, "rb") as f:
         pickle_data = pickle.load(f)
 
     rand_idx = np.random.randint(0, len(pickle_data))
+    print(f"Random index: {rand_idx}")
     sample = pickle_data[rand_idx]
     feature = DrumMIDIFeature(sample["midi_bytes"])
-    token_sequence = feature.to_token_sequence()
-    print(token_sequence.shape)
-    feature_reconstructed = feature.from_token_sequence(token_sequence)
+    fixed_grid, _ = feature.to_fixed_grid(steps_per_quarter=4)
+    feature_reconstructed = feature.from_fixed_grid(fixed_grid, steps_per_quarter=4)
     feature_reconstructed.play()
+
+    # Simplify
+    fixedGrid_simplified = feature.simplify_fixed_grid(win_size=3, velocity_threshold=0.5, max_hits_per_win=1, retain_prob=1.0)
+    feature_simplified   = feature.from_fixed_grid(fixedGrid_simplified, steps_per_quarter=4)
+    feature_simplified.play()
+
+    # Convert to button HVO
+    button_hvo = feature_simplified.to_button_hvo(steps_per_quarter=4, num_buttons=2)
+    button_hvo_feature = feature_simplified.from_button_hvo(button_hvo, steps_per_quarter=4)
+    button_hvo_feature.play_button_hvo(button_hvo_feature)
+
+
+
+
+
+    '''
+
+    # Reduce
+    fixedGrid_reduced = feature.reduce_groove_fixed_grid(velocity_threshold=0.4)
+    feature_reconstructed = feature.from_fixed_grid(fixedGrid_reduced, steps_per_quarter=4)
+    feature_reconstructed.play()
+
+    '''

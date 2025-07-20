@@ -38,19 +38,20 @@ class GrooveIQ_Trainer(BaseTrainer):
         self.offset_loss   = nn.MSELoss(reduction='none')
 
         # Constraint losses
-        latent_loss_type = self.config['loss'].get('latent_loss_type', 'l1_temporal_diff')
+        latent_loss_type = self.config['loss'].get('latent_loss_type', 'l1_sparsity_time')
         latent_loss_dim  = self.config['loss'].get('latent_loss_dim', -1)
-        print(f"Using latent loss type: {latent_loss_type}")
-        if latent_loss_type == 'l1_temporal_diff':
-            self.latent_loss = lambda x: ConstraintLosses().l1_temporal_diff(x, dim=latent_loss_dim)
-        elif latent_loss_type == 'l2_temporal_diff':
-            self.latent_loss = lambda x: ConstraintLosses().l2_temporal_diff(x, dim=latent_loss_dim)
-        elif latent_loss_type == 'group_sparse_temporal_diff':
-            self.latent_loss = lambda x: ConstraintLosses().group_sparse_temporal_diff(x, dim=latent_loss_dim)
-        elif latent_loss_type == 'l1_sparsity_time':
+        
+        if latent_loss_type == 'l1_sparsity_time':
             self.latent_loss = lambda x: ConstraintLosses().l1_sparsity_time(x, dim=latent_loss_dim)
         elif latent_loss_type == 'l2_sparsity_time':
             self.latent_loss = lambda x: ConstraintLosses().l2_sparsity_time(x, dim=latent_loss_dim)
+        elif latent_loss_type == 'elastic_sparsity_time':
+            self.latent_loss = lambda x: ConstraintLosses().l1_sparsity_time(x, dim=latent_loss_dim) + \
+                                        ConstraintLosses().l2_sparsity_time(x, dim=latent_loss_dim)
+        else:
+            raise ValueError(f"Invalid latent loss type: {latent_loss_type}")
+        
+        print(f"Using latent loss type: {latent_loss_type} at dim: {latent_loss_dim}")
 
 
     def set_optimizer(self, optimizer) -> None:

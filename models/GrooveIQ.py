@@ -116,7 +116,7 @@ class GrooveIQ(nn.Module):
         latent = self.aggregate_instrument(encoded) # (B, T, D)
         
         # Button latent
-        button_latent = self.button_projection(latent).view(B, T, self.num_buttons, M)
+        button_latent = self.button_projection(latent) # (B, T, num_buttons * M)
 
         # z
         latent_time = self.aggregate_time(latent)
@@ -137,11 +137,13 @@ class GrooveIQ(nn.Module):
     def make_button_hvo(self, button_latent):
         """
         Args:
-            latent: Tensor of shape (B, T, num_buttons, M)
+            latent: Tensor of shape (B, T, num_buttons * M)
         Returns:
             button_hvo: (B, T, num_buttons, M) — [hit, velocity, offset]
         """
         # Get hits and velocity from latent
+        B, T, _ = button_latent.shape
+        button_latent = button_latent.view(B, T, self.num_buttons, self.M)
         hits_latent     = button_latent[:, :, :, 0]   # (B, T, num_buttons)
         velocity_latent = button_latent[:, :, :, 1]   # (B, T, num_buttons)
         offset_latent   = button_latent[:, :, :, 2]   # (B, T, num_buttons)
@@ -238,7 +240,7 @@ class GrooveIQ(nn.Module):
             h_logits: Tensor of shape (B, T, E)
             v: Tensor of shape (B, T, E)
             o: Tensor of shape (B, T, E)
-            button_latent: Tensor of shape (B, T, num_button, M)
+            button_latent: Tensor of shape (B, T, num_button * M)
             button_hvo: Tensor of shape (B, T, num_buttons, M)
             velocity_penalty: Tensor of shape (B)
             offset_penalty: Tensor of shape (B)
