@@ -528,7 +528,7 @@ class Sketch2Groove_Trainer(BaseTrainer):
         # Save generated midi
         for result in val_results:
             results.append({
-                'generated_sample': result['generated_sample'].to_dict(),
+                'generated_sample': None if result['generated_sample'] is None else result['generated_sample'].to_dict(),
                 'target_sample': result['target_sample'].to_dict(),
                 'button_hvo': result['button_hvo'].cpu().detach(),
             })
