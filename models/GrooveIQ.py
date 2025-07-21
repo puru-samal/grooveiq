@@ -134,10 +134,11 @@ class GrooveIQ(nn.Module):
         hard = (x > threshold).float()
         return x + (hard - x).detach()
     
-    def make_button_hvo(self, button_latent):
+    def make_button_hvo(self, button_latent, button_hvo_target=None):
         """
         Args:
             latent: Tensor of shape (B, T, num_buttons, M)
+            button_hvo_target: Tensor of shape (B, T, num_buttons, M) A heuristic target for the button HVO.
         Returns:
             button_hvo: (B, T, num_buttons, M) — [hit, velocity, offset]
         """
@@ -149,13 +150,16 @@ class GrooveIQ(nn.Module):
         velocity_latent = (torch.tanh(velocity_latent) + 1.0) / 2.0 # [-1.0, 1.0] -> [0, 1]
         offset_latent   = torch.tanh(offset_latent) * 0.5           # [-1.0, 1.0] -> [-0.5, 0.5]
 
+        heuristic_loss = torch.tensor(0.0, device=button_latent.device)
+        if button_hvo_target is not None:
+            heuristic_loss = self.heuristic_loss(button_hvo_target, torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1))
+
         # Quantize
         hits_latent     = self.straight_through_binarize(hits_latent)
         velocity_latent = velocity_latent if not self.is_velocity_quantized else self.velocity_quantizer(velocity_latent)
         offset_latent   = offset_latent if not self.is_offset_quantized else self.offset_quantizer(offset_latent)
-        
         button_hvo      = torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1) # (B, T, num_buttons, M)
-        return button_hvo 
+        return button_hvo, heuristic_loss
     
     def supervised_regularizer(self, mu, labels):
         """
@@ -169,6 +173,32 @@ class GrooveIQ(nn.Module):
         mu_supervised = torch.sigmoid(mu[:, :self.supervised_dim])
         sup_loss = F.mse_loss(mu_supervised, labels, reduction='mean')
         return sup_loss
+    
+    def heuristic_loss(self, button_hvo_target, button_hvo_pred):
+        """
+        Args:
+            button_hvo_target: Tensor of shape (B, T, num_buttons, M)
+            button_hvo_pred: Tensor of shape (B, T, num_buttons, M)
+        Returns:
+            loss: scalar
+        """
+        hit_mask = (button_hvo_target[:, :, :, 0] == 1).float() # (B, T, num_buttons)
+        hit_loss = F.binary_cross_entropy_with_logits(
+            button_hvo_pred[:, :, :, 0] * hit_mask, 
+            button_hvo_target[:, :, :, 0], 
+            reduction='mean'
+        )
+        velocity_loss = F.mse_loss(
+            button_hvo_pred[:, :, :, 1] * hit_mask, 
+            button_hvo_target[:, :, :, 1], 
+            reduction='mean'
+        )
+        offset_loss = F.mse_loss(
+            button_hvo_pred[:, :, :, 2] * hit_mask, 
+            button_hvo_target[:, :, :, 2], 
+            reduction='mean'
+        )
+        return hit_loss + velocity_loss + offset_loss
     
 
     def decode(self, input, button_hvo, z):
@@ -227,12 +257,14 @@ class GrooveIQ(nn.Module):
         Sample z from standard normal prior
         """
         return torch.randn(batch_size, self.z_dim, device=device)
+    
 
-    def forward(self, x, labels=None):
+    def forward(self, x, labels=None, button_hvo_target=None):
         """
         Args:
             x: Tensor of shape (B, T, E, M)
             labels: Tensor of shape (B, supervised_dim)
+            button_hvo_target: Tensor of shape (B, T, num_buttons, M) A heuristic target for the button HVO.
         Returns:
             h_logits: Tensor of shape (B, T, E)
             v: Tensor of shape (B, T, E)
@@ -248,7 +280,7 @@ class GrooveIQ(nn.Module):
         button_latent, z, mu, kl_loss = self.encode(x) # (B, T, num_buttons, M), (B, z_dim), (B, z_dim), (B)
 
         # ========== MAKE BUTTON HVO ==========
-        button_hvo = self.make_button_hvo(button_latent) # (B, T, num_buttons, M)
+        button_hvo, heuristic_loss = self.make_button_hvo(button_latent, button_hvo_target) # (B, T, num_buttons, M)
 
         # ========== DECODING ==========
         h_logits, v, o, attn_weights = self.decode(x, button_hvo, z) # (B, T, E), (B, T, E), (B, T, E)
@@ -277,6 +309,7 @@ class GrooveIQ(nn.Module):
                 'button_hvo': button_hvo, 
                 'attn_weights': attn_weights, 
                 'vo_penalty': vo_penalty, 
+                'heuristic_loss': heuristic_loss,
                 'kl_loss': kl_loss, 
                 'sup_loss': sup_loss
             }

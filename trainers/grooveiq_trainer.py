@@ -28,9 +28,10 @@ class GrooveIQ_Trainer(BaseTrainer):
         self.hit_penalty = config['loss'].get('hit_penalty', 1.0)
         self.threshold   = config['loss'].get('threshold', 0.5)
         self.recons_weight = config['loss'].get('recons_weight', 1.0)
-        self.kld_weight    = config['loss'].get('kld_weight', 1.0)
-        self.constraint_weight = config['loss'].get('constraint_weight', 0.1)
-        self.sup_weight        = config['loss'].get('sup_weight', 1.0)
+        self.kld_weight    = config['loss'].get('kld_weight', 0.0)
+        self.constraint_weight = config['loss'].get('constraint_weight', 0.0)
+        self.sup_weight        = config['loss'].get('sup_weight', 0.0)
+        self.heuristic_weight  = config['loss'].get('heuristic_weight', 0.0)
         
         # Reconstruction losses
         self.hit_loss      = nn.BCEWithLogitsLoss(reduction='none', pos_weight=torch.tensor(self.pos_weight))
@@ -38,7 +39,7 @@ class GrooveIQ_Trainer(BaseTrainer):
         self.offset_loss   = nn.MSELoss(reduction='none')
 
         # Constraint losses
-        latent_loss_type = self.config['loss'].get('latent_loss_type', 'l1_sparsity_time')
+        latent_loss_type = self.config['loss'].get('latent_loss_type', 'none')
         latent_loss_dim  = self.config['loss'].get('latent_loss_dim', -1)
         
         if latent_loss_type == 'l1_sparsity_time':
@@ -49,7 +50,9 @@ class GrooveIQ_Trainer(BaseTrainer):
             self.latent_loss = lambda x: ConstraintLosses().l1_sparsity_time(x, dim=latent_loss_dim) + \
                                         ConstraintLosses().l2_sparsity_time(x, dim=latent_loss_dim)
         else:
-            raise ValueError(f"Invalid latent loss type: {latent_loss_type}")
+            if latent_loss_type != 'none':
+                raise ValueError(f"Invalid latent loss type: {latent_loss_type}")
+            self.latent_loss = lambda x: torch.tensor(0.0, device=x.device)
         
         print(f"Using latent loss type: {latent_loss_type} at dim: {latent_loss_dim}")
 
@@ -76,6 +79,7 @@ class GrooveIQ_Trainer(BaseTrainer):
         running_kld_loss = 0.0
         running_vo_penalty = 0.0
         running_sup_loss = 0.0
+        running_heuristic_loss = 0.0
         running_joint_loss = 0.0
         running_sample_count = 0
         
@@ -93,13 +97,13 @@ class GrooveIQ_Trainer(BaseTrainer):
         self.optimizer.zero_grad()
 
         for i, batch in enumerate(dataloader):
-            grids, samples, labels = batch['grid'].to(self.device), batch['samples'], batch['labels']
+            grids, samples, labels, button_hvo_target = batch['grid'].to(self.device), batch['samples'], batch['labels'], batch['button_hvo'].to(self.device)
             if labels is not None:
                 labels = labels.float().to(self.device)
             h_true, v_true, o_true = grids[:, :, :, 0], grids[:, :, :, 1], grids[:, :, :, 2]
 
             with torch.autocast(device_type=self.device, dtype=torch.float16):
-                outputs  = self.model(grids, labels)
+                outputs  = self.model(grids, labels, button_hvo_target)
                 h_logits = outputs['h_logits']
                 h_mask   = (torch.sigmoid(h_logits) > self.threshold).int()
                 v_pred   = outputs['v'] * h_mask
@@ -110,6 +114,7 @@ class GrooveIQ_Trainer(BaseTrainer):
                 vo_penalty    = outputs['vo_penalty']
                 kl_loss  = outputs['kl_loss']
                 sup_loss = outputs['sup_loss']
+                heuristic_loss = outputs['heuristic_loss']
 
                 # Hit penalty for penalizing velocity/offset when there is no hit
                 hit_penalty = torch.where(h_true == 1, self.hit_penalty, 0.0)
@@ -120,13 +125,16 @@ class GrooveIQ_Trainer(BaseTrainer):
                 offset_mse = (self.offset_loss(o_pred, o_true) * hit_penalty).mean()
 
                 # Constraint losses
-                latent_penalty = self.latent_loss(button_latent)
+                no_hit_mask = (button_hvo_target[:, :, :, 0] == 0).float().unsqueeze(-1) # (B, T, num_buttons, 1)
+                latent_penalty = self.latent_loss(button_latent * no_hit_mask)
 
                 # Joint loss
                 joint_loss = self.recons_weight * (hit_bce + velocity_mse + offset_mse) + \
                              self.constraint_weight * latent_penalty + \
-                             self.kld_weight * kl_loss + vo_penalty + \
-                             self.sup_weight * sup_loss
+                             self.kld_weight * kl_loss + \
+                             self.sup_weight * sup_loss + \
+                             self.heuristic_weight * heuristic_loss + \
+                             vo_penalty
 
             # Compute hit metrics
             hit_pred_int = (torch.sigmoid(h_logits) > self.threshold).int()
@@ -151,6 +159,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             running_latent_penalty += latent_penalty.item() * batch_size
             running_kld_loss += kl_loss.item() * batch_size
             running_sup_loss += sup_loss.item() * batch_size
+            running_heuristic_loss += heuristic_loss.item() * batch_size
             running_joint_loss += joint_loss.item() * batch_size
             running_hit_acc += hit_acc * batch_size
             running_hit_ppv += hit_ppv * batch_size
@@ -177,6 +186,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             avg_latent_penalty = running_latent_penalty / running_sample_count
             avg_kld_loss = running_kld_loss / running_sample_count
             avg_sup_loss = running_sup_loss / running_sample_count
+            avg_heuristic_loss = running_heuristic_loss / running_sample_count
             avg_vo_penalty = running_vo_penalty / running_sample_count
             avg_joint_loss = running_joint_loss / running_sample_count
             avg_hit_acc = running_hit_acc / running_sample_count
@@ -197,6 +207,7 @@ class GrooveIQ_Trainer(BaseTrainer):
                 latent_penalty=f"{avg_latent_penalty:.4f}",
                 kld_loss=f"{avg_kld_loss:.4f}",
                 sup_loss=f"{avg_sup_loss:.4f}",
+                heuristic_loss=f"{avg_heuristic_loss:.4f}",
                 joint=f"{avg_joint_loss:.4f}",
                 acc_step=f"{(i % self.config['training']['gradient_accumulation_steps']) + 1}/{self.config['training']['gradient_accumulation_steps']}"
             )
@@ -229,6 +240,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             'kld_loss': running_kld_loss / running_sample_count,
             'sup_loss': running_sup_loss / running_sample_count,
             'vo_penalty': running_vo_penalty / running_sample_count,
+            'heuristic_loss': running_heuristic_loss / running_sample_count,
             'joint_loss': running_joint_loss / running_sample_count,
         }
 
@@ -344,7 +356,7 @@ class GrooveIQ_Trainer(BaseTrainer):
                 
                 grids, samples = batch['grid'].to(self.device), batch['samples']
                 button_latent, z, _, _ = self.model.encode(grids)
-                button_hvo = self.model.make_button_hvo(button_latent)
+                button_hvo, _ = self.model.make_button_hvo(button_latent)
                 generated_grids, hit_probs = self.model.generate(button_hvo, z, max_steps=max_length, threshold=self.threshold)
 
                 torch.cuda.empty_cache()
