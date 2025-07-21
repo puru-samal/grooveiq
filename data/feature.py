@@ -461,13 +461,14 @@ class DrumMIDIFeature:
         T= fixed_grid.shape[0]
         out_grid = torch.zeros_like(fixed_grid)
         win_size = random.choices([win_size for win_size, _ in win_sizes], weights=[prob for _, prob in win_sizes], k=1)[0]
-        velocity_threshold = random.uniform(velocity_range[0], velocity_range[1])
+
+        # Compute the max velocity across the entire performance
+        max_velocity = fixed_grid[:, :, 1].max().item()
+        velocity_threshold_ratio = random.uniform(velocity_range[0], velocity_range[1])
+        velocity_threshold = max_velocity * velocity_threshold_ratio
 
         for i in range(0, T, win_size):
             slice = fixed_grid[i:i+win_size]  # shape: (win_size, E, 3)
-
-            if slice.shape[0] < win_size:
-                continue  # skip incomplete window at end
 
             # Get velocities and apply threshold
             velocity_slice = slice[:, :, 1]  # shape: (win_size, E)
@@ -484,9 +485,7 @@ class DrumMIDIFeature:
                 continue  # drop entire window randomly
 
             # Determine how many hits to keep (could be 1 or up to max_hits_per_window)
-            k = random.randint(1, max_hits_per_win)
-            if k > len(valid_indices):
-                k = len(valid_indices)
+            k = min(len(valid_indices), random.randint(1, max_hits_per_win))
 
             # Rank valid hits by velocity
             velocities = velocity_slice[mask]  # 1D tensor
