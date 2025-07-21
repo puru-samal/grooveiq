@@ -81,8 +81,9 @@ class Sketch2Groove_Trainer(BaseTrainer):
             with torch.autocast(device_type=self.device, dtype=torch.float16):
                 outputs  = self.model(grids, button_hvo, labels)
                 h_logits = outputs['h_logits']
-                v_pred   = outputs['v']
-                o_pred   = outputs['o']
+                h_mask   = (torch.sigmoid(h_logits) > self.threshold).int()
+                v_pred   = outputs['v'] * h_mask
+                o_pred   = outputs['o'] * h_mask
                 attn_weights  = outputs['attn_weights']
                 kl_loss  = outputs['kl_loss']
                 sup_loss = outputs['sup_loss']
@@ -308,7 +309,7 @@ class Sketch2Groove_Trainer(BaseTrainer):
                 
                 grids, button_hvo, samples = batch['grid'].to(self.device), batch['button_hvo'].to(self.device), batch['samples']
                 z, _, _ = self.model.encode(grids)
-                generated_grids, hit_probs = self.model.generate(button_hvo, z, max_steps=max_length)
+                generated_grids, hit_probs = self.model.generate(button_hvo, z, max_steps=max_length, threshold=self.threshold)
 
                 torch.cuda.empty_cache()
 

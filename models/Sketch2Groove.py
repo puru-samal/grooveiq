@@ -167,9 +167,8 @@ class Sketch2Groove(nn.Module):
         output = self.output_projection(decoder_out) # (B, T', E*M)
         output = output.view(B, T, E, M) # (B, T', E*M) -> (B, T, E, M)
         h_logits = output[:, :, :, 0] # (B, T, E)
-        hit_mask = (torch.sigmoid(h_logits) > 0.5).int()                 # (B, T, E)
-        v = ((torch.tanh(output[:, :, :, 1]) + 1.0) / 2.0) * hit_mask    # (B, T, E)
-        o = torch.tanh(output[:, :, :, 2]) * 0.5 * hit_mask # (B, T, E)
+        v = ((torch.tanh(output[:, :, :, 1]) + 1.0) / 2.0) # (B, T, E)
+        o = torch.tanh(output[:, :, :, 2]) * 0.5           # (B, T, E)
 
         attn_weights = {
             'self_attn': self.decoder.layers[0].self_attn_weights,   # first layer (B, T', T')
@@ -216,7 +215,7 @@ class Sketch2Groove(nn.Module):
                 'sup_loss': sup_loss
             }
     
-    def generate(self, button_hvo, z=None, max_steps=None):
+    def generate(self, button_hvo, z=None, max_steps=None, threshold=0.5):
         """
         Generate a prediction for the input at time t, given input < t, button HVO <= t, and latent vector z.
         Args:
@@ -276,7 +275,7 @@ class Sketch2Groove(nn.Module):
             hit_probs.append(h_prob)
 
             # Predict
-            h_pred = (h_prob > 0.5).int() # (B, E)
+            h_pred = (h_prob > threshold).int() # (B, E)
             v_pred = ((torch.tanh(pred_step[:, :, 1]) + 1.0) / 2.0) * h_pred 
             o_pred = torch.tanh(pred_step[:, :, 2]) * 0.5 * h_pred    
             hvo_pred  = torch.stack([h_pred, v_pred, o_pred], dim=-1) # (B, E, 3)
