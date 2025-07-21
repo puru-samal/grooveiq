@@ -99,12 +99,14 @@ class DrumMIDIDataset(Dataset):
 
         if self.feature_type == "fixed":
             grid, _ = sample.feature.to_fixed_grid(steps_per_quarter=self.steps_per_quarter)
-            button_hvo = sample.feature.simplify_fixed_grid(
-                win_sizes        = [(s['size'], s['prob']) for s in self.aug_config["win_sizes"]], 
-                velocity_range   = (self.aug_config["velocity_range"]["min"], self.aug_config["velocity_range"]["max"]), 
-                max_hits_per_win = self.aug_config["max_hits_per_win"], 
-                win_retain_prob  = self.aug_config["win_retain_prob"]
-            ).to_button_hvo(steps_per_quarter=self.steps_per_quarter, num_buttons=self.aug_config["num_buttons"])
+            button_hvo = sample.feature.simplify_to_button_hvo(
+                steps_per_quarter=self.steps_per_quarter,
+                num_buttons=self.aug_config["num_buttons"],
+                win_sizes=[(s['size'], s['prob']) for s in self.aug_config["win_sizes"]], 
+                velocity_range=(self.aug_config["velocity_range"]["min"], self.aug_config["velocity_range"]["max"]), 
+                max_hits_per_win=self.aug_config["max_hits_per_win"], 
+                win_retain_prob=self.aug_config["win_retain_prob"]
+            )
             desc_label, _ = sample.descriptors.get_feature_vector()
             return sample, grid, button_hvo, desc_label
         elif self.feature_type == "flexible":

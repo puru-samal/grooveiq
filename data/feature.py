@@ -582,6 +582,54 @@ class DrumMIDIFeature:
                         button_hvo[t, button_e] = torch.tensor([1.0, velocity, offset])
         return button_hvo.float()
     
+    def simplify_to_button_hvo(self, steps_per_quarter=4, num_buttons=3,
+                           win_sizes=[(1, 0.1), (2, 0.5), (3, 0.15), (4, 0.25)],
+                           velocity_range=(0.5, 0.8), max_hits_per_win=1, win_retain_prob=0.8) -> torch.Tensor:
+        """
+        Combines simplification and button HVO projection into a single pass.
+        Returns:
+            button_hvo: (T, num_buttons, 3)
+        """
+        grid, _ = self.to_fixed_grid(steps_per_quarter=steps_per_quarter)
+        T, E, M = grid.shape
+
+        # Mapping for buttons
+        button_map = {
+            0: [0, 1],       # low
+            1: [2, 3, 4],    # mid
+            2: [5, 6, 7, 8], # high
+        }
+        inv_button_map = {e: k for k, v in button_map.items() for e in v}
+        button_hvo = torch.zeros((T, num_buttons, 3), device=grid.device)
+
+        # Sample simplification parameters
+        win_size = random.choices([s for s, _ in win_sizes], weights=[p for _, p in win_sizes])[0]
+        max_velocity = grid[:, :, 1].max().item()
+        velocity_threshold = max_velocity * random.uniform(*velocity_range)
+
+        for i in range(0, T, win_size):
+            slice = grid[i:i+win_size]  # (w, E, 3)
+            vel_slice = slice[:, :, 1]
+            mask = vel_slice > velocity_threshold
+            if not mask.any() or random.random() > win_retain_prob:
+                continue
+
+            valid_indices = mask.nonzero(as_tuple=False)  # (N_valid, 2)
+            k = min(len(valid_indices), random.randint(1, max_hits_per_win))
+            velocities = vel_slice[mask]
+            topk = torch.topk(velocities, k)
+            selected = valid_indices[topk.indices]
+            
+            for t_rel, e in selected:
+                t = i + t_rel
+                b = inv_button_map[int(e)]
+                if b < num_buttons:
+                    if button_hvo[t, b, 1] < slice[t_rel, e, 1]:  # keep stronger hit
+                        button_hvo[t, b] = slice[t_rel, e]  # full HVO
+
+        return button_hvo
+
+    
     #########################################################################################
     # Token sequence methods
     #########################################################################################
@@ -967,11 +1015,9 @@ if __name__ == "__main__":
     feature_reconstructed.play()
 
     # Simplify
-    feature_simplified = feature.simplify_fixed_grid(win_sizes=[(2, 0.5), (3, 0.25), (4, 0.25)], velocity_range=(0.5, 0.8), max_hits_per_win=2, win_retain_prob=1.0)
-    feature_simplified.play()
+    button_hvo = feature.simplify_to_button_hvo(win_sizes=[(2, 1.0)], velocity_range=(0.5, 0.8), max_hits_per_win=1, win_retain_prob=1.0, steps_per_quarter=4, num_buttons=2)
 
     # Convert to button HVO
-    button_hvo = feature_simplified.to_button_hvo(steps_per_quarter=4, num_buttons=2)
     button_hvo_feature = feature.from_button_hvo(button_hvo, steps_per_quarter=4)
     button_hvo_feature.play_button_hvo(button_hvo_feature)
 
