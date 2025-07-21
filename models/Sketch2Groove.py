@@ -2,16 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchinfo import summary
-from torch.autograd import Function
 from .sub_modules import (
     DrumAxialTransformer, 
     PositionalEncoding, 
     CausalMask, 
-    LearnableBinsQuantizer,
     TransformerDecoderLayer
 )
 
-class GrooveIQ(nn.Module):
+class Sketch2Groove(nn.Module):
     """
     ### Input shape:
         x: Tensor of shape (B, T, E, M)
@@ -26,7 +24,7 @@ class GrooveIQ(nn.Module):
             z_dim=64, supervised_dim=0,
             embed_dim=128, encoder_depth=4, encoder_heads=4,
             decoder_depth=2, decoder_heads=4, 
-            num_buttons=2, num_bins_velocity=8, num_bins_offset=16
+            num_buttons=2
     ):
         """
         Args:
@@ -41,8 +39,6 @@ class GrooveIQ(nn.Module):
             decoder_depth (int): Number of layers in the decoder.
             decoder_heads (int): Number of attention heads.
             num_buttons (int): Number of buttons.
-            num_bins_velocity (int): Number of bins for velocity. (0 for no quantization)
-            num_bins_offset (int): Number of bins for offset. (0 for no quantization)
         """
         super().__init__()
         
@@ -56,8 +52,6 @@ class GrooveIQ(nn.Module):
         self.encoder_heads = encoder_heads
         self.decoder_depth = decoder_depth
         self.num_buttons   = num_buttons
-        self.is_velocity_quantized = num_bins_velocity > 0
-        self.is_offset_quantized   = num_bins_offset > 0
 
         self.sos_token = nn.Parameter(torch.randn(1, E, M))
         self.pos_emb   = PositionalEncoding(embed_dim, T)
@@ -71,7 +65,6 @@ class GrooveIQ(nn.Module):
         self.z_logvar_proj     = nn.Linear(embed_dim, z_dim)
         self.attn_proj_instr   = nn.Linear(embed_dim, 1)
         self.time_attn_proj    = nn.Linear(embed_dim, 1)
-        self.button_projection = nn.Linear(embed_dim, num_buttons * M) # (B, T, D) -> (B, T, num_buttons * M)
 
         self.dec_inp_proj      = nn.Linear(E * M, embed_dim) # (B, T', E*M) -> (B, T', D)
         self.dec_button_proj   = nn.Linear(z_dim + num_buttons * M, embed_dim) # (B, T', z_dim + num_buttons*M) -> (B, T', D)
@@ -83,10 +76,6 @@ class GrooveIQ(nn.Module):
         )
         
         self.output_projection = nn.Linear(embed_dim, E * M) # (B, T', D) -> (B, T', E*M)
-
-        # Learned bin quantizers
-        self.velocity_quantizer = LearnableBinsQuantizer(num_bins_velocity, min_val=0.0, max_val=1.0)
-        self.offset_quantizer   = LearnableBinsQuantizer(num_bins_offset, min_val=-0.5, max_val=0.5)
 
     def aggregate_instrument(self, encoded):
         # (B, T, E, D) -> (B, T, D)
@@ -106,56 +95,23 @@ class GrooveIQ(nn.Module):
         Args:
             x: Tensor of shape (B, T, E, M)
         Returns:
-            button_latent: Tensor of shape (B, T, num_buttons, M)
             z: Tensor of shape (B, z_dim)
             mu: Tensor of shape (B, z_dim)
             kl_loss: scalar
         """
         B, T, E, M = x.shape
         encoded = self.encoder(x)                   # (B, T, E, D)
-        latent = self.aggregate_instrument(encoded) # (B, T, D)
         
-        # Button latent
-        button_latent = self.button_projection(latent).view(B, T, self.num_buttons, M)
-
         # z
-        latent_time = self.aggregate_time(latent)
-        mu = self.z_mu_proj(latent_time)          # (B, z_dim)
-        logvar = self.z_logvar_proj(latent_time)  # (B, z_dim)
+        latent = self.aggregate_instrument(encoded) # (B, T, D)
+        latent = self.aggregate_time(latent) # (B, D)
+        mu = self.z_mu_proj(latent)          # (B, z_dim)
+        logvar = self.z_logvar_proj(latent)  # (B, z_dim)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         z = mu + eps * std  # Reparameterization  # (B, z_dim)
         kl_loss = (-0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)).mean() # (B)
-        
-        return button_latent, z, mu, kl_loss
-    
-    def straight_through_binarize(self, x, threshold=0.5):
-        """Applies hard threshold during forward, identity gradient during backward."""
-        hard = (x > threshold).float()
-        return x + (hard - x).detach()
-    
-    def make_button_hvo(self, button_latent):
-        """
-        Args:
-            latent: Tensor of shape (B, T, num_buttons, M)
-        Returns:
-            button_hvo: (B, T, num_buttons, M) — [hit, velocity, offset]
-        """
-        # Get hits and velocity from latent
-        hits_latent     = button_latent[:, :, :, 0]   # (B, T, num_buttons)
-        velocity_latent = button_latent[:, :, :, 1]   # (B, T, num_buttons)
-        offset_latent   = button_latent[:, :, :, 2]   # (B, T, num_buttons)
-        hits_latent     = torch.sigmoid(hits_latent)
-        velocity_latent = (torch.tanh(velocity_latent) + 1.0) / 2.0 # [-1.0, 1.0] -> [0, 1]
-        offset_latent   = torch.tanh(offset_latent) * 0.5           # [-1.0, 1.0] -> [-0.5, 0.5]
-
-        # Quantize
-        hits_latent     = self.straight_through_binarize(hits_latent)
-        velocity_latent = velocity_latent if not self.is_velocity_quantized else self.velocity_quantizer(velocity_latent)
-        offset_latent   = offset_latent if not self.is_offset_quantized else self.offset_quantizer(offset_latent)
-        
-        button_hvo      = torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1) # (B, T, num_buttons, M)
-        return button_hvo 
+        return z, mu, kl_loss
     
     def supervised_regularizer(self, mu, labels):
         """
@@ -170,7 +126,6 @@ class GrooveIQ(nn.Module):
         sup_loss = F.mse_loss(mu_supervised, labels, reduction='mean')
         return sup_loss
     
-
     def decode(self, input, button_hvo, z):
         """
         Args:
@@ -191,11 +146,10 @@ class GrooveIQ(nn.Module):
         target = self.pos_emb(target) # (B, T', D)
         target_causal_mask = CausalMask(target) # (T', T')
         
-        button_hit_mask = (~(button_hvo[:, :, :, 0].sum(dim=-1) == 0)).float().unsqueeze(-1)     # (B, T, 1)
         combined_latent = torch.cat(
             [
                 z.unsqueeze(1).expand(-1, T, -1), 
-                button_hvo.view(B, T, num_buttons * M) * button_hit_mask
+                button_hvo.view(B, T, num_buttons * M)
             ], dim=2) # (B, T, z_dim + num_buttons * M)
         memory = self.dec_button_proj(combined_latent)  # (B, T', D)
         memory = self.pos_emb(memory) # (B, T', D)
@@ -229,42 +183,25 @@ class GrooveIQ(nn.Module):
         """
         return torch.randn(batch_size, self.z_dim, device=device)
 
-    def forward(self, x, labels=None):
+    def forward(self, x, button_hvo, labels=None):
         """
         Args:
             x: Tensor of shape (B, T, E, M)
+            button_hvo: Tensor of shape (B, T, num_buttons, M)
             labels: Tensor of shape (B, supervised_dim)
         Returns:
             h_logits: Tensor of shape (B, T, E)
             v: Tensor of shape (B, T, E)
             o: Tensor of shape (B, T, E)
-            button_latent: Tensor of shape (B, T, num_button, M)
-            button_hvo: Tensor of shape (B, T, num_buttons, M)
             attn_weights: Dictionary of attention weights
-            vo_penalty: Tensor of shape (B)
             kl_loss: Tensor of shape (B)
             sup_loss: Tensor of shape (B)
         """
         # ========== ENCODING ==========
-        button_latent, z, mu, kl_loss = self.encode(x) # (B, T, num_buttons, M), (B, z_dim), (B, z_dim), (B)
-
-        # ========== MAKE BUTTON HVO ==========
-        button_hvo = self.make_button_hvo(button_latent) # (B, T, num_buttons, M)
+        z, mu, kl_loss = self.encode(x) # (B, z_dim), (B, z_dim), (B)
 
         # ========== DECODING ==========
         h_logits, v, o, attn_weights = self.decode(x, button_hvo, z) # (B, T, E), (B, T, E), (B, T, E)
-
-        button_hits     = button_hvo[:, :, :, 0] # (B, T, num_buttons)
-        button_velocity = button_hvo[:, :, :, 1] # (B, T, num_buttons)
-        button_offset   = button_hvo[:, :, :, 2] # (B, T, num_buttons)
-        
-        # Penalize offset/velocity values in non-hit frames (maybe not needed, since we mask out non-hit frames in decoder)
-        no_hit_mask = (button_hits == 0).float().unsqueeze(-1) # (B, T, num_buttons, 1)
-        vo_penalty  = torch.stack([
-            button_velocity, 
-            button_offset
-        ], dim=-1) * no_hit_mask # (B, T, num_buttons, 2)
-        vo_penalty = vo_penalty.abs().mean()
 
         sup_loss = torch.tensor(0.0, device=x.device)
         if labels is not None:
@@ -274,10 +211,7 @@ class GrooveIQ(nn.Module):
                 'h_logits': h_logits, 
                 'v': v, 
                 'o': o, 
-                'button_latent': button_latent, 
-                'button_hvo': button_hvo, 
                 'attn_weights': attn_weights, 
-                'vo_penalty': vo_penalty, 
                 'kl_loss': kl_loss, 
                 'sup_loss': sup_loss
             }
@@ -302,7 +236,6 @@ class GrooveIQ(nn.Module):
 
         generated = self.sos_token.unsqueeze(0).repeat(B, 1, 1, 1) # (B, 1, E, M)
         hit_probs = []
-        button_hit_mask = (~(button_hvo[:, :, :, 0].sum(dim=-1) == 0)).float().unsqueeze(-1) # (B, T, 1)
         for t in range(T_gen):
 
             # Target
@@ -313,7 +246,7 @@ class GrooveIQ(nn.Module):
             combined_latent = torch.cat(
                 [
                     z.unsqueeze(1).expand(-1, t + 1, -1), 
-                    button_hvo[:, :t + 1].view(B, t + 1, num_buttons * M) * button_hit_mask[:, :t + 1, :]
+                    button_hvo[:, :t + 1].view(B, t + 1, num_buttons * M)
                 ], dim=2
             ) # (B, T, z_dim + num_buttons * M)
             mem_embed = self.dec_button_proj(combined_latent) # (B, T, D)
@@ -352,14 +285,14 @@ class GrooveIQ(nn.Module):
         return generated, torch.stack(hit_probs, dim=1) # (B, T, E)
 
 if __name__ == "__main__":
-    input_size = (4, 33, 9, 3)
-    encoder = GrooveIQ(
-        T=33, E=9, M=3, z_dim=64, supervised_dim=4,
-        embed_dim=128, encoder_depth=4, encoder_heads=4, 
-        decoder_depth=1, decoder_heads=2, 
-        num_buttons=3, num_bins_velocity=8, num_bins_offset=16
-    )
-    summary(encoder, input_size=input_size)
+    input_size  = (4, 33, 9, 3)
+    button_size = (4, 33, 3, 3)
+    model = Sketch2Groove(T=33, E=9, M=3, 
+                          z_dim=64, supervised_dim=4,
+                          embed_dim=128, encoder_depth=2, encoder_heads=2, 
+                          decoder_depth=1, decoder_heads=1, 
+                          num_buttons=3)
+    summary(model, input_size=(input_size, button_size))
 
 
         

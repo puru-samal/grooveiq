@@ -16,6 +16,7 @@ class DrumMIDIDataset(Dataset):
                  feature_type: Literal["fixed", "flexible"] = "fixed", 
                  steps_per_quarter: int = 4,
                  subset: float = 1.0,
+                 aug_config: Dict = None,
                  verbose: bool = False,
         ):
         """
@@ -27,6 +28,7 @@ class DrumMIDIDataset(Dataset):
             feature_type: Type of feature to use for the dataset [fixed, flexible]
             steps_per_quarter: Number of steps per quarter note for the fixed grid representation
             subset: Fraction of the dataset to load
+            aug_config: Configuration for data augmentation
             verbose: Whether to print verbose output
         """
         self.data_path = path
@@ -35,6 +37,7 @@ class DrumMIDIDataset(Dataset):
         self.num_bars = num_bars
         self.feature_type = feature_type
         self.steps_per_quarter = steps_per_quarter
+        self.aug_config = aug_config
         assert self.feature_type in ["fixed", "flexible"], "Invalid feature type"
 
         print(f"Loading dataset from: {self.data_path}...")
@@ -89,14 +92,21 @@ class DrumMIDIDataset(Dataset):
             A tuple containing:
                 - SampleData object
                 - Fixed/Flexible grid representation of the sample of shape (T, E, M)
-                - Stats of the sample
+                - Button HVO representation of the sample of shape (T, num_buttons, M)
+                - Descriptor label vector of the sample
         """
         sample = self.data_stats[ind]
 
         if self.feature_type == "fixed":
             grid, _ = sample.feature.to_fixed_grid(steps_per_quarter=self.steps_per_quarter)
+            button_hvo = sample.feature.simplify_fixed_grid(
+                win_sizes        = [(s['size'], s['prob']) for s in self.aug_config["win_sizes"]], 
+                velocity_range   = (self.aug_config["velocity_range"]["min"], self.aug_config["velocity_range"]["max"]), 
+                max_hits_per_win = self.aug_config["max_hits_per_win"], 
+                win_retain_prob  = self.aug_config["win_retain_prob"]
+            ).to_button_hvo(steps_per_quarter=self.steps_per_quarter, num_buttons=self.aug_config["num_buttons"])
             desc_label, _ = sample.descriptors.get_feature_vector()
-            return sample, grid, desc_label
+            return sample, grid, button_hvo, desc_label
         elif self.feature_type == "flexible":
             grid, _ = sample.feature.to_flexible_grid(max_hits_per_class=self.data_stats.max_hits_per_class, steps_per_quarter=self.steps_per_quarter)
             desc_label, _ = sample.descriptors.get_feature_vector()
@@ -111,12 +121,14 @@ class DrumMIDIDataset(Dataset):
         Returns:
             Dict with:
                 - 'grid': Tensor of shape (B, T_max, E, M)
+                - 'button_hvo': Tensor of shape (B, T_max, num_buttons, M)
                 - 'samples': List of SampleData
-                - 'stats': List of stats
+                - 'labels': List of descriptor label vectors
         """
-        samples, grids, desc_labels = zip(*batch)
+        samples, grids, button_hvos, desc_labels = zip(*batch)
         T_max = max(g.shape[0] for g in grids)
         E, M = grids[0].shape[1:]
+        num_buttons = button_hvos[0].shape[1]
 
         padded_grids = [
             torch.cat([g, torch.zeros((T_max - g.shape[0], E, M))], dim=0)
@@ -124,8 +136,15 @@ class DrumMIDIDataset(Dataset):
             for g in grids
         ]
 
+        padded_button_hvos = [
+            torch.cat([bh, torch.zeros((T_max - bh.shape[0], num_buttons, M))], dim=0)
+            if bh.shape[0] < T_max else bh
+            for bh in button_hvos
+        ]
+
         return {
             'grid': torch.stack(padded_grids),  # (B, T_max, E, M)
+            'button_hvo': torch.stack(padded_button_hvos),  # (B, T_max, num_buttons, M)
             'samples': list(samples),
             'labels': torch.stack(desc_labels)
         }

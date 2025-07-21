@@ -442,24 +442,26 @@ class DrumMIDIFeature:
         score.tracks[0] = track
         return DrumMIDIFeature.from_score(score)
     
-    def simplify_fixed_grid(self, win_size: int = 2, velocity_threshold: float = 0.5, max_hits_per_win: int = 1, retain_prob: float = 0.8) -> torch.Tensor:
+    def simplify_fixed_grid(self, win_sizes: List[tuple] = [(1, 0.1), (2, 0.5), (3, 0.15), (4, 0.25)], velocity_range: tuple[float, float] = (0.5, 0.8), max_hits_per_win: int = 1, win_retain_prob: float = 0.8) -> "DrumMIDIFeature":
         """
         Simplifies a (T, E, 3) HVO grid by selecting up to `max_hits_per_window` strongest hits per window,
         applying thresholding and random retention.
         
         Args:
             fixed_grid (Tensor): (T, E, 3) drum sequence (hit, velocity, offset)
-            win_size (int): window size in timesteps (e.g. 2 = 1/8th note if 1/16 resolution)
-            velocity_threshold (float): minimum velocity to consider a hit "real"
+            win_sizes (List[tuple(int, float)]): List of window sizes where each tuple is (window_size, prob) (e.g. [(2, 0.5), (4, 0.5)])
+            velocity_range (tuple(float, float)): range to sample velocity threshold from
             max_hits_per_window (int): max hits to keep per window (randomized)
-            retain_prob (float): probability to keep any given window (to allow full zeroing)
+            win_retain_prob (float): probability to keep any given window (to allow full zeroing)
 
         Returns:
             Tensor: (T, E, 3) simplified grid
         """
         fixed_grid, _ = self.to_fixed_grid(steps_per_quarter=4)
-        T, E, M = fixed_grid.shape
+        T= fixed_grid.shape[0]
         out_grid = torch.zeros_like(fixed_grid)
+        win_size = random.choices([win_size for win_size, _ in win_sizes], weights=[prob for _, prob in win_sizes], k=1)[0]
+        velocity_threshold = random.uniform(velocity_range[0], velocity_range[1])
 
         for i in range(0, T, win_size):
             slice = fixed_grid[i:i+win_size]  # shape: (win_size, E, 3)
@@ -478,7 +480,7 @@ class DrumMIDIFeature:
             valid_indices = mask.nonzero(as_tuple=False)  # shape: (N_valid, 2), with (t, e)
 
             # Randomly choose to keep this window
-            if random.random() > retain_prob:
+            if random.random() > win_retain_prob:
                 continue  # drop entire window randomly
 
             # Determine how many hits to keep (could be 1 or up to max_hits_per_window)
@@ -494,7 +496,7 @@ class DrumMIDIFeature:
             for t_rel, e in selected_indices:
                 out_grid[i + t_rel, e] = slice[t_rel, e]  # copy full HVO
 
-        return out_grid
+        return self.from_fixed_grid(out_grid, steps_per_quarter=4)
     
     def reduce_groove_fixed_grid(self, velocity_threshold=0.4):
         """
@@ -577,7 +579,7 @@ class DrumMIDIFeature:
                 hit, velocity, offset = grid[t, e].tolist()
                 if hit > 0:
                     button_e = inv_button_map[e]
-                    if button_hvo[t, button_e, 1] < velocity and button_e < num_buttons:
+                    if button_e < num_buttons and button_hvo[t, button_e, 1] < velocity:
                         button_hvo[t, button_e] = torch.tensor([1.0, velocity, offset])
         return button_hvo.float()
     
@@ -966,13 +968,12 @@ if __name__ == "__main__":
     feature_reconstructed.play()
 
     # Simplify
-    fixedGrid_simplified = feature.simplify_fixed_grid(win_size=3, velocity_threshold=0.5, max_hits_per_win=1, retain_prob=1.0)
-    feature_simplified   = feature.from_fixed_grid(fixedGrid_simplified, steps_per_quarter=4)
+    feature_simplified = feature.simplify_fixed_grid(win_sizes=[(2, 0.5), (3, 0.25), (4, 0.25)], velocity_range=(0.5, 0.8), max_hits_per_win=2, win_retain_prob=1.0)
     feature_simplified.play()
 
     # Convert to button HVO
     button_hvo = feature_simplified.to_button_hvo(steps_per_quarter=4, num_buttons=2)
-    button_hvo_feature = feature_simplified.from_button_hvo(button_hvo, steps_per_quarter=4)
+    button_hvo_feature = feature.from_button_hvo(button_hvo, steps_per_quarter=4)
     button_hvo_feature.play_button_hvo(button_hvo_feature)
 
 
