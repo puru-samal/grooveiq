@@ -189,12 +189,12 @@ class GrooveIQ(nn.Module):
             reduction='mean'
         )
         velocity_loss = F.mse_loss(
-            button_hvo_pred[:, :, :, 1], 
+            button_hvo_pred[:, :, :, 1] * hit_mask, 
             button_hvo_target[:, :, :, 1], 
             reduction='mean'
         )
         offset_loss = F.mse_loss(
-            button_hvo_pred[:, :, :, 2], 
+            button_hvo_pred[:, :, :, 2] * hit_mask, 
             button_hvo_target[:, :, :, 2], 
             reduction='mean'
         )
