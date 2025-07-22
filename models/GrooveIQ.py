@@ -182,22 +182,25 @@ class GrooveIQ(nn.Module):
         Returns:
             loss: scalar
         """
+        weight = torch.tensor(15.0, device=button_hvo_pred.device)
         hit_mask = (button_hvo_target[:, :, :, 0] == 1).float() # (B, T, num_buttons)
+        hit_mask = hit_mask * weight
         hit_loss = F.binary_cross_entropy_with_logits(
             button_hvo_pred[:, :, :, 0], 
             button_hvo_target[:, :, :, 0], 
-            reduction='mean'
+            reduction='mean',
+            pos_weight=weight
         )
-        velocity_loss = F.mse_loss(
-            button_hvo_pred[:, :, :, 1] * hit_mask, 
+        velocity_loss = (F.mse_loss(
+            button_hvo_pred[:, :, :, 1], 
             button_hvo_target[:, :, :, 1], 
-            reduction='mean'
-        )
-        offset_loss = F.mse_loss(
-            button_hvo_pred[:, :, :, 2] * hit_mask, 
+            reduction='none'
+        ) * hit_mask).mean()
+        offset_loss = (F.mse_loss(
+            button_hvo_pred[:, :, :, 2], 
             button_hvo_target[:, :, :, 2], 
-            reduction='mean'
-        )
+            reduction='none'
+        ) * hit_mask).mean()
         return hit_loss + velocity_loss + offset_loss
     
 
