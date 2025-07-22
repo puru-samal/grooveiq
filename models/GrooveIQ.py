@@ -184,17 +184,17 @@ class GrooveIQ(nn.Module):
         """
         hit_mask = (button_hvo_target[:, :, :, 0] == 1).float() # (B, T, num_buttons)
         hit_loss = F.binary_cross_entropy_with_logits(
-            button_hvo_pred[:, :, :, 0] * hit_mask, 
+            button_hvo_pred[:, :, :, 0], 
             button_hvo_target[:, :, :, 0], 
             reduction='mean'
         )
         velocity_loss = F.mse_loss(
-            button_hvo_pred[:, :, :, 1] * hit_mask, 
+            button_hvo_pred[:, :, :, 1], 
             button_hvo_target[:, :, :, 1], 
             reduction='mean'
         )
         offset_loss = F.mse_loss(
-            button_hvo_pred[:, :, :, 2] * hit_mask, 
+            button_hvo_pred[:, :, :, 2], 
             button_hvo_target[:, :, :, 2], 
             reduction='mean'
         )
