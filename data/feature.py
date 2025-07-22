@@ -619,7 +619,7 @@ class DrumMIDIFeature:
             velocities = vel_slice[mask]
             topk = torch.topk(velocities, k)
             selected = valid_indices[topk.indices]
-            
+
             for t_rel, e in selected:
                 t = i + t_rel
                 b = inv_button_map[int(e)]
@@ -837,7 +837,7 @@ class DrumMIDIFeature:
             print("sounddevice not found, will not be able to play audio")
             return
         
-        shift_map = {pitch: 60 + i for i, pitch in enumerate(self.canonical_map.keys())}
+        shift_map = {pitch: 61 + 2 * i for i, pitch in enumerate(self.canonical_map.keys())}
         shifted_score = button_hvo.score.copy()
         for note in shifted_score.tracks[0].notes:
             offset = shift_map[note.pitch] - note.pitch

@@ -125,7 +125,7 @@ class GrooveIQ(nn.Module):
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         z = mu + eps * std  # Reparameterization  # (B, z_dim)
-        kl_loss = (-0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)).mean() # (B)
+        kl_loss = - 0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) # Scalar
         
         return button_latent, z, mu, kl_loss
     
