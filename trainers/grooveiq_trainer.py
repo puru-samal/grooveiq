@@ -125,8 +125,7 @@ class GrooveIQ_Trainer(BaseTrainer):
                 offset_mse = (self.offset_loss(o_pred, o_true) * hit_penalty).mean()
 
                 # Constraint losses
-                no_hit_mask = (button_hvo_target[:, :, :, 0] == 0).float().unsqueeze(-1) # (B, T, num_buttons, 1)
-                latent_penalty = self.latent_loss(button_latent * no_hit_mask)
+                latent_penalty = self.latent_loss(button_latent)
 
                 # Joint loss
                 joint_loss = self.recons_weight * (hit_bce + velocity_mse + offset_mse) + \
