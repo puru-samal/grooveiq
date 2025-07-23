@@ -26,7 +26,8 @@ class GrooveIQ(nn.Module):
             z_dim=64, supervised_dim=0,
             embed_dim=128, encoder_depth=4, encoder_heads=4,
             decoder_depth=2, decoder_heads=4, 
-            num_buttons=2, num_bins_velocity=8, num_bins_offset=16
+            num_buttons=2, num_bins_velocity=8, num_bins_offset=16,
+            monotonic_alignment='hard'
     ):
         """
         Args:
@@ -43,6 +44,7 @@ class GrooveIQ(nn.Module):
             num_buttons (int): Number of buttons.
             num_bins_velocity (int): Number of bins for velocity. (0 for no quantization)
             num_bins_offset (int): Number of bins for offset. (0 for no quantization)
+            monotonic_alignment (str): 'hard' or 'soft'
         """
         super().__init__()
         
@@ -58,6 +60,7 @@ class GrooveIQ(nn.Module):
         self.num_buttons   = num_buttons
         self.is_velocity_quantized = num_bins_velocity > 0
         self.is_offset_quantized   = num_bins_offset > 0
+        self.monotonic_alignment = monotonic_alignment
 
         self.sos_token = nn.Parameter(torch.randn(1, E, M))
         self.pos_emb   = PositionalEncoding(embed_dim, T)
@@ -72,6 +75,7 @@ class GrooveIQ(nn.Module):
         self.attn_proj_instr   = nn.Linear(embed_dim, 1)
         self.time_attn_proj    = nn.Linear(embed_dim, 1)
         self.button_projection = nn.Linear(embed_dim, num_buttons * M) # (B, T, D) -> (B, T, num_buttons * M)
+        self.align_proj        = nn.Linear(num_buttons * M, embed_dim) # (B, T, num_buttons * M) -> (B, T, D)
 
         self.dec_inp_proj      = nn.Linear(E * M, embed_dim) # (B, T', E*M) -> (B, T', D)
         self.dec_button_proj   = nn.Linear(z_dim + num_buttons * M, embed_dim) # (B, T', z_dim + num_buttons*M) -> (B, T', D)
@@ -152,7 +156,10 @@ class GrooveIQ(nn.Module):
 
         heuristic_loss = torch.tensor(0.0, device=button_latent.device)
         if button_hvo_target is not None:
-            heuristic_loss = self.heuristic_loss(button_hvo_target, torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1))
+            if self.monotonic_alignment == 'hard':
+                heuristic_loss = self.hard_monotonic_alignment(button_hvo_target, torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1))
+            elif self.monotonic_alignment == 'soft':
+                heuristic_loss = self.soft_monotonic_alignment(button_hvo_target, torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1))
 
         # Quantize
         hits_latent     = self.straight_through_binarize(hits_latent)
@@ -174,7 +181,7 @@ class GrooveIQ(nn.Module):
         sup_loss = F.mse_loss(mu_supervised, labels, reduction='mean')
         return sup_loss
     
-    def heuristic_loss(self, button_hvo_target, button_hvo_pred):
+    def hard_monotonic_alignment(self, button_hvo_target, button_hvo_pred):
         """
         Args:
             button_hvo_target: Tensor of shape (B, T, num_buttons, M)
@@ -203,6 +210,38 @@ class GrooveIQ(nn.Module):
         ) * hit_mask).mean()
         return hit_loss + velocity_loss + offset_loss
     
+    def soft_monotonic_alignment(self, button_hvo_target, button_hvo_pred, temperature=1.0):
+        """
+        Args:
+            button_hvo_target: Tensor (B, T, num_buttons, M)
+            button_hvo_pred:   Tensor (B, T, num_buttons, M)
+        Returns:
+            loss: scalar
+        """
+        B, T, num_buttons, M = button_hvo_target.shape
+        D = self.align_proj.out_features
+
+        # Project to shared alignment space
+        target_proj = self.align_proj(button_hvo_target.view(B, T, num_buttons * M))  # (B, T, D)
+        pred_proj   = self.align_proj(button_hvo_pred.view(B, T, num_buttons * M))    # (B, T, D)
+
+        # Compute attention energies: pred aligns to target (monotonic)
+        energy = torch.matmul(pred_proj, target_proj.transpose(1, 2))  # (B, T, T)
+
+        # Mask future time steps
+        monotonic_mask = torch.tril(torch.ones(T, T, device=energy.device))  # (T, T)
+        energy = energy.masked_fill(monotonic_mask == 0, float('-inf'))
+
+        # Compute soft monotonic alignment
+        alignment_probs = torch.softmax(energy / temperature, dim=-1)  # (B, T, T)
+
+        # Expected target under alignment
+        aligned_target = torch.matmul(alignment_probs, target_proj)  # (B, T, D)
+
+        # Match prediction to soft-aligned target
+        loss = F.mse_loss(aligned_target, pred_proj, reduction='mean')
+        return loss
+
 
     def decode(self, input, button_hvo, z):
         """
@@ -392,7 +431,8 @@ if __name__ == "__main__":
         T=33, E=9, M=3, z_dim=64, supervised_dim=4,
         embed_dim=128, encoder_depth=4, encoder_heads=4, 
         decoder_depth=1, decoder_heads=2, 
-        num_buttons=3, num_bins_velocity=8, num_bins_offset=16
+        num_buttons=3, num_bins_velocity=8, num_bins_offset=16,
+        monotonic_alignment='hard'
     )
     summary(encoder, input_size=input_size)
 
