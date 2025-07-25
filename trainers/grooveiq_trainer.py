@@ -28,6 +28,7 @@ class GrooveIQ_Trainer(BaseTrainer):
         self.hit_penalty = config['loss'].get('hit_penalty', 1.0)
         self.threshold   = config['loss'].get('threshold', 0.5)
         self.recons_weight = config['loss'].get('recons_weight', 1.0)
+        self.vo_weight     = config['loss'].get('vo_weight', 1.0)
         self.kld_weight    = config['loss'].get('kld_weight', 0.0)
         self.constraint_weight = config['loss'].get('constraint_weight', 0.0)
         self.sup_weight        = config['loss'].get('sup_weight', 0.0)
@@ -133,7 +134,7 @@ class GrooveIQ_Trainer(BaseTrainer):
                              self.kld_weight * kl_loss + \
                              self.sup_weight * sup_loss + \
                              self.heuristic_weight * heuristic_loss + \
-                             vo_penalty
+                             vo_penalty * self.vo_weight
 
             # Compute hit metrics
             hit_pred_int = (torch.sigmoid(h_logits) > self.threshold).int()
