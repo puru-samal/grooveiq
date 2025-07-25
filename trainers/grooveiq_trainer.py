@@ -98,9 +98,11 @@ class GrooveIQ_Trainer(BaseTrainer):
         self.optimizer.zero_grad()
 
         for i, batch in enumerate(dataloader):
-            grids, samples, labels, button_hvo_target = batch['grid'].to(self.device), batch['samples'], batch['labels'], batch['button_hvo'].to(self.device)
+            grids, samples, labels, button_hvo_target = batch['grid'].to(self.device), batch['samples'], batch['labels'], batch['button_hvo']
             if labels is not None:
                 labels = labels.float().to(self.device)
+            if button_hvo_target is not None: # For RNN models
+                button_hvo_target = button_hvo_target.to(self.device)
             h_true, v_true, o_true = grids[:, :, :, 0], grids[:, :, :, 1], grids[:, :, :, 2]
 
             with torch.autocast(device_type=self.device, dtype=torch.float16):

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchinfo import summary
+from typing import Literal
 from torch.autograd import Function
 from .sub_modules import (
     DrumAxialTransformer, 
@@ -27,7 +28,8 @@ class GrooveIQ(nn.Module):
             embed_dim=128, encoder_depth=4, encoder_heads=4,
             decoder_depth=2, decoder_heads=4, 
             num_buttons=2, num_bins_velocity=8, num_bins_offset=16,
-            monotonic_alignment='hard'
+            monotonic_alignment='hard', 
+            button_type: Literal['Causal', 'Non-Causal'] = 'Causal'
     ):
         """
         Args:
@@ -45,6 +47,7 @@ class GrooveIQ(nn.Module):
             num_bins_velocity (int): Number of bins for velocity. (0 for no quantization)
             num_bins_offset (int): Number of bins for offset. (0 for no quantization)
             monotonic_alignment (str): 'hard' or 'soft'
+            button_type (str): 'Causal' or 'Non-Causal'
         """
         super().__init__()
         
@@ -61,6 +64,7 @@ class GrooveIQ(nn.Module):
         self.is_velocity_quantized = num_bins_velocity > 0
         self.is_offset_quantized   = num_bins_offset > 0
         self.monotonic_alignment = monotonic_alignment
+        self.button_type = button_type
 
         self.sos_token = nn.Parameter(torch.randn(1, E, M))
         self.pos_emb   = PositionalEncoding(embed_dim, T)
@@ -271,7 +275,7 @@ class GrooveIQ(nn.Module):
             ], dim=2) # (B, T, z_dim + num_buttons * M)
         memory = self.dec_button_proj(combined_latent)  # (B, T', D)
         memory = self.pos_emb(memory) # (B, T', D)
-        memory_causal_mask = CausalMask(memory) # (T', T')
+        memory_causal_mask = CausalMask(memory) if self.button_type == 'Causal' else None # (T', T')
 
         decoder_out = self.decoder(
             tgt = target, 
@@ -279,7 +283,7 @@ class GrooveIQ(nn.Module):
             tgt_mask = target_causal_mask,
             memory_mask = memory_causal_mask,
             tgt_is_causal = True,
-            memory_is_causal = True
+            memory_is_causal = self.button_type == 'Causal'
         ) # (B, T', D)
 
         output = self.output_projection(decoder_out) # (B, T', E*M)
@@ -395,7 +399,7 @@ class GrooveIQ(nn.Module):
             
             # Mask
             tgt_mask = CausalMask(tgt_embed_pos)
-            mem_mask = CausalMask(mem_embed_pos)
+            mem_mask = CausalMask(mem_embed_pos) if self.button_type == 'Causal' else None
            
             dec_out = self.decoder(
                 tgt = tgt_embed_pos, 
@@ -403,7 +407,7 @@ class GrooveIQ(nn.Module):
                 tgt_mask = tgt_mask, 
                 memory_mask = mem_mask, 
                 tgt_is_causal = True,   
-                memory_is_causal = True
+                memory_is_causal = self.button_type == 'Causal'
             ) # (B, t + 1, D)
 
             # Output

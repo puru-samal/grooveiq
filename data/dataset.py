@@ -99,14 +99,18 @@ class DrumMIDIDataset(Dataset):
 
         if self.feature_type == "fixed":
             grid, _ = sample.feature.to_fixed_grid(steps_per_quarter=self.steps_per_quarter)
-            button_hvo = sample.feature.simplify_to_button_hvo(
-                steps_per_quarter=self.steps_per_quarter,
-                num_buttons=self.aug_config["num_buttons"],
-                win_sizes=[(s['size'], s['prob']) for s in self.aug_config["win_sizes"]], 
-                velocity_range=(self.aug_config["velocity_range"]["min"], self.aug_config["velocity_range"]["max"]), 
-                max_hits_per_win=self.aug_config["max_hits_per_win"], 
-                win_retain_prob=self.aug_config["win_retain_prob"]
-            )
+            
+            if self.aug_config is not None:
+                button_hvo = sample.feature.simplify_to_button_hvo(
+                    steps_per_quarter=self.steps_per_quarter,
+                    num_buttons=self.aug_config["num_buttons"],
+                    win_sizes=[(s['size'], s['prob']) for s in self.aug_config["win_sizes"]], 
+                    velocity_range=(self.aug_config["velocity_range"]["min"], self.aug_config["velocity_range"]["max"]), 
+                    max_hits_per_win=self.aug_config["max_hits_per_win"], 
+                    win_retain_prob=self.aug_config["win_retain_prob"]
+                )
+            else:
+                button_hvo = None
             desc_label, _ = sample.descriptors.get_feature_vector()
             return sample, grid, button_hvo, desc_label
         elif self.feature_type == "flexible":
@@ -130,7 +134,7 @@ class DrumMIDIDataset(Dataset):
         samples, grids, button_hvos, desc_labels = zip(*batch)
         T_max = max(g.shape[0] for g in grids)
         E, M = grids[0].shape[1:]
-        num_buttons = button_hvos[0].shape[1]
+
 
         padded_grids = [
             torch.cat([g, torch.zeros((T_max - g.shape[0], E, M))], dim=0)
@@ -138,15 +142,18 @@ class DrumMIDIDataset(Dataset):
             for g in grids
         ]
 
-        padded_button_hvos = [
-            torch.cat([bh, torch.zeros((T_max - bh.shape[0], num_buttons, M))], dim=0)
-            if bh.shape[0] < T_max else bh
-            for bh in button_hvos
-        ]
+        padded_button_hvos = None
+        if button_hvos[0] is not None:
+            num_buttons = button_hvos[0].shape[1]
+            padded_button_hvos = [
+                torch.cat([bh, torch.zeros((T_max - bh.shape[0], num_buttons, M))], dim=0)
+                if bh.shape[0] < T_max else bh
+                for bh in button_hvos
+            ]
 
         return {
             'grid': torch.stack(padded_grids),  # (B, T_max, E, M)
-            'button_hvo': torch.stack(padded_button_hvos),  # (B, T_max, num_buttons, M)
+            'button_hvo': torch.stack(padded_button_hvos) if padded_button_hvos is not None else None,  # (B, T_max, num_buttons, M)
             'samples': list(samples),
             'labels': torch.stack(desc_labels)
         }

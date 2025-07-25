@@ -214,9 +214,11 @@ class GrooveIQ_RNN(nn.Module):
         target = torch.cat([self.sos_token.unsqueeze(0).repeat(B, 1, 1, 1), input[:, :-1]], dim=1)
         target = self.pos_emb(self.dec_inp_proj(target.view(B, T, E * M)))
 
+        # Ignore info at non-hit frames
+        button_hit_mask = (~(button_hvo[:, :, :, 0].sum(dim=-1) == 0)).float().unsqueeze(-1) # (B, T, 1)
         combined_latent = torch.cat([
             z.unsqueeze(1).expand(-1, T, -1),
-            button_hvo.view(B, T, num_buttons * M)
+            button_hvo.view(B, T, num_buttons * M) * button_hit_mask
         ], dim=2) # (B, T, z_dim + num_buttons * M)
         memory = self.pos_emb(self.dec_button_proj(combined_latent)) # (B, T, embed_dim)
         decoder_inp = target + memory              # (B, T, embed_dim)
@@ -308,9 +310,11 @@ class GrooveIQ_RNN(nn.Module):
         hidden = None
         hit_probs = []
 
+        # Ignore info at non-hit frames
+        button_hit_mask = (~(button_hvo[:, :, :, 0].sum(dim=-1) == 0)).float().unsqueeze(-1) # (B, T, 1)
         combined_latent = torch.cat([
             z.unsqueeze(1).expand(-1, T_gen, -1),
-            button_hvo[:, :T_gen].view(B, T_gen, num_buttons * M)
+            button_hvo[:, :T_gen].view(B, T_gen, num_buttons * M) * button_hit_mask
         ], dim=2) # (B, T_gen, z_dim + num_buttons * M)
         memory_embed = self.pos_emb(self.dec_button_proj(combined_latent)) # (B, T_gen, embed_dim)
 
