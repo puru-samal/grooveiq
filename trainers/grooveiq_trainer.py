@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 import torch.nn.functional as F
-from utils import ConstraintLosses
+from utils import ConstraintLosses, WeightScheduler
 from models import GrooveIQ
 import torchaudio.functional as aF
 from data import DrumMIDIFeature
@@ -54,7 +54,9 @@ class GrooveIQ_Trainer(BaseTrainer):
             if latent_loss_type != 'none':
                 raise ValueError(f"Invalid latent loss type: {latent_loss_type}")
             self.latent_loss = lambda x: torch.tensor(0.0, device=x.device)
-        
+
+        # Weight scheduler
+        self.kl_weight_scheduler = None # Init it before training
         print(f"Using latent loss type: {latent_loss_type} at dim: {latent_loss_dim}")
 
 
@@ -63,6 +65,9 @@ class GrooveIQ_Trainer(BaseTrainer):
 
     def set_scheduler(self, scheduler) -> None:
         self.scheduler = scheduler
+
+    def set_kl_weight_scheduler(self, kl_weight_scheduler) -> None:
+        self.kl_weight_scheduler = kl_weight_scheduler
 
     def _train_epoch(self, dataloader):
         """
@@ -96,6 +101,13 @@ class GrooveIQ_Trainer(BaseTrainer):
         running_offset_mse     = 0.0
 
         self.optimizer.zero_grad()
+
+        # Get KL weight
+        if self.kl_weight_scheduler is not None:
+            kl_weight = self.kl_weight_scheduler.get_weight()
+            self.kl_weight_scheduler.step()
+        else:
+            kl_weight = self.kld_weight
 
         for i, batch in enumerate(dataloader):
             grids, samples, labels, button_hvo_target = batch['grid'].to(self.device), batch['samples'], batch['labels'], batch['button_hvo']
@@ -133,7 +145,7 @@ class GrooveIQ_Trainer(BaseTrainer):
                 # Joint loss
                 joint_loss = self.recons_weight * (hit_bce + velocity_mse + offset_mse) + \
                              self.constraint_weight * latent_penalty + \
-                             self.kld_weight * kl_loss + \
+                             kl_weight * kl_loss + \
                              self.sup_weight * sup_loss + \
                              self.heuristic_weight * heuristic_loss + \
                              vo_penalty * self.vo_weight
@@ -211,6 +223,7 @@ class GrooveIQ_Trainer(BaseTrainer):
                 sup_loss=f"{avg_sup_loss:.4f}",
                 heuristic_loss=f"{avg_heuristic_loss:.4f}",
                 joint=f"{avg_joint_loss:.4f}",
+                kl_weight=f"{kl_weight:.4f}",
                 acc_step=f"{(i % self.config['training']['gradient_accumulation_steps']) + 1}/{self.config['training']['gradient_accumulation_steps']}"
             )
             batch_bar.update()
@@ -244,6 +257,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             'vo_penalty': running_vo_penalty / running_sample_count,
             'heuristic_loss': running_heuristic_loss / running_sample_count,
             'joint_loss': running_joint_loss / running_sample_count,
+            'kl_weight': kl_weight,
         }
 
         # Plotting
