@@ -381,6 +381,16 @@ class GrooveIQ(nn.Module):
         generated = self.sos_token.unsqueeze(0).repeat(B, 1, 1, 1) # (B, 1, E, M)
         hit_probs = []
         button_hit_mask = (~(button_hvo[:, :, :, 0].sum(dim=-1) == 0)).float().unsqueeze(-1) # (B, T, 1)
+        
+        cached_latent = None
+        if self.button_type == 'Non-Causal':
+            cached_latent = torch.cat(
+                [
+                    z.unsqueeze(1).expand(-1, T, -1), 
+                    button_hvo.view(B, T, num_buttons * M) * button_hit_mask
+                ], dim=2
+            ) # (B, T, z_dim + num_buttons * M)
+        
         for t in range(T_gen):
 
             # Target
@@ -388,12 +398,15 @@ class GrooveIQ(nn.Module):
             tgt_embed_pos = self.pos_emb(tgt_embed)
             
             # Memory
-            combined_latent = torch.cat(
-                [
-                    z.unsqueeze(1).expand(-1, t + 1, -1), 
-                    button_hvo[:, :t + 1].view(B, t + 1, num_buttons * M) * button_hit_mask[:, :t + 1, :]
-                ], dim=2
-            ) # (B, T, z_dim + num_buttons * M)
+            if cached_latent is None:
+                combined_latent = torch.cat(
+                    [
+                        z.unsqueeze(1).expand(-1, t + 1, -1), 
+                        button_hvo[:, :t + 1].view(B, t + 1, num_buttons * M) * button_hit_mask[:, :t + 1, :]
+                    ], dim=2
+                ) # (B, T, z_dim + num_buttons * M)
+            else:
+                combined_latent = cached_latent # (B, T, z_dim + num_buttons * M)
             mem_embed = self.dec_button_proj(combined_latent) # (B, T, D)
             mem_embed_pos = self.pos_emb(mem_embed)
             
