@@ -57,10 +57,17 @@ class FeatureDescriptors:
 
         self.groove = NewGroove(hits_matrix, timing_matrix, tempo, extract_features=True, velocity_type=velocity_type)
         self.descriptors = {
-            "complexity" : self.groove.RhythmFeatures.total_complexity,
+            "total_density" : self.groove.RhythmFeatures.total_density,
+            "total_complexity" : self.groove.RhythmFeatures.total_complexity,
+            "total_average_intensity" : self.groove.RhythmFeatures.total_average_intensity,
             "lowness"    : self.groove.RhythmFeatures.low_density,
             "midness"    : self.groove.RhythmFeatures.mid_density,
-            "highness"   : self.groove.RhythmFeatures.high_density
+            "highness"   : self.groove.RhythmFeatures.high_density,
+            "combined_syncopation" : self.groove.RhythmFeatures.combined_syncopation,
+            "polyphonic_syncopation" : self.groove.RhythmFeatures.polyphonic_syncopation,
+            "laidbackness" : self.groove.MicrotimingFeatures.laidbackness,
+            "swingness" : self.groove.MicrotimingFeatures.swingness,
+            "timing_accuracy" : self.groove.MicrotimingFeatures.timing_accuracy,
         }
 
     def _get_all_hit_info(self, midi, tempo, keymap):
@@ -87,7 +94,7 @@ class FeatureDescriptors:
         return hits
 
     def get_feature_vector(self) -> Tuple[torch.Tensor, List[str]]:
-        keys = list(self.descriptors.keys())
+        keys = ["total_complexity", "lowness", "midness", "highness"]
         vector = torch.tensor([self.descriptors[k] for k in keys])
         return vector, keys
 

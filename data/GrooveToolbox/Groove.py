@@ -42,7 +42,7 @@ class NewGroove():
 
         if extract_features:
             self.RhythmFeatures.calculate_all_features()
-            #self.MicrotimingFeatures.calculate_all_features()
+            self.MicrotimingFeatures.calculate_all_features()
 
     def _groupGroove5KitParts(self):
         # Group kit parts into 5 polyphony levels
@@ -146,15 +146,15 @@ class RhythmFeatures():
 
     def calculate_all_features(self):
         # Get all standard features in one go
-        #self.combined_syncopation = self.get_combined_syncopation()
-        #self.polyphonic_syncopation =self.get_polyphonic_syncopation()
+        self.combined_syncopation = self.get_combined_syncopation()
+        self.polyphonic_syncopation =self.get_polyphonic_syncopation()
         #self.low_syncopation = self.get_low_syncopation()
         #self.mid_syncopation = self.get_mid_syncopation()
         #self.high_syncopation = self.get_high_syncopation()
         self.low_density = self.get_low_density()
         self.mid_density = self.get_mid_density()
         self.high_density = self.get_high_density()
-        #self.total_density = self.get_total_density()
+        self.total_density = self.get_total_density()
         #self.hiness = self.get_hiness()
         #self.hisyncness = self.get_hisyncness()
         #self.autocorrelation_skew = self.get_autocorrelation_skew()
@@ -162,7 +162,7 @@ class RhythmFeatures():
         #self.autocorrelation_centroid = self.get_autocorrelation_centroid()
         #self.autocorrelation_harmonicity = self.get_autocorrelation_harmonicity()
         #self.total_symmetry = self.get_total_symmetry()
-        #self.total_average_intensity = self.get_total_average_intensity()
+        self.total_average_intensity = self.get_total_average_intensity()
         #self.total_weak_to_strong_ratio = self.get_total_weak_to_strong_ratio()
         self.total_complexity = self.get_total_complexity()
 
@@ -612,7 +612,6 @@ class MicrotimingFeatures():
 
     def calculate_all_features(self):
         # Get all microtiming features.
-
         self.laidbackness = self.laidback_events - self.pushed_events
         self.timing_accuracy = self.get_timing_accuracy()
 
@@ -761,7 +760,7 @@ class MicrotimingFeatures():
                 if ~np.isnan(self.average_timing_matrix[i]):
                     nonswing_timing += abs(np.nan_to_num(self.average_timing_matrix[i]))
                     nonswing_note_count += 1
-        self.timing_accuracy = nonswing_timing / float(nonswing_note_count)
+        self.timing_accuracy = 1.0 if nonswing_note_count == 0 else nonswing_timing / float(nonswing_note_count)
 
         return self.timing_accuracy
 

@@ -371,6 +371,39 @@ class DataStats:
             filtered_stats.accumulate_sample(sample)
         return filtered_stats
     
+    def stratified_subset(self, num_samples: int) -> 'DataStats':
+        """
+        Create a new DataStats object containing a stratified subset of the dataset.
+        """
+        total_samples = len(self.all_samples)
+        if num_samples > total_samples:
+            raise ValueError(f"Cannot create a subset larger than the dataset ({total_samples} samples)")
+        
+        # Get all styles and their bar counts
+        styles = list(self.style_map.keys())
+        style_bar_counts = {style: self.style_map[style]['bar_count'] for style in styles}
+        bar_counts = {style: self.style_map[style]['bar_count'] for style in styles}
+
+        # Calculate per style bar counters
+        style_bar_counts = {style: int(style_bar_counts[style] * num_samples / total_samples) for style in styles}
+
+        # Group samples by style
+        style_samples = {style: [] for style in styles}
+        for sample in self.all_samples:
+            style_samples[sample.style].append(sample)
+
+        # Shuffle samples *per style*
+        for style in styles:
+            random.shuffle(style_samples[style])
+
+        # Create new DataStats object   
+        stratified_stats = DataStats()
+        stratified_stats.set_name(f"{self.name}_{num_samples}samples")
+        for style in styles:
+            for sample in style_samples[style][:style_bar_counts[style]]:
+                stratified_stats.accumulate_sample(sample)
+        return stratified_stats
+    
     def stratified_split(self, train_size: float, val_size: float, test_size: float) -> Tuple['DataStats', 'DataStats', 'DataStats']:
         """
         Split the dataset into train, validation, and test sets.
@@ -403,7 +436,7 @@ class DataStats:
         val_bar_counts   = {style: {'curr_bars': 0, 'target_bars': int(style_bar_counts[style] * val_size)} for style in styles}
         test_bar_counts  = {style: {'curr_bars': 0, 'target_bars': int(style_bar_counts[style] * test_size)} for style in styles}
 
-         # Group samples by style
+        # Group samples by style
         style_samples = {style: [] for style in styles}
         for sample in self.all_samples:
             style_samples[sample.style].append(sample)
@@ -541,24 +574,15 @@ class DataStats:
                 print(f"    • Types           : {type_str}")
                 print(f"    • Bar Lengths     : {bar_len_str}")
 
-    def visualize(self) -> None:
+    def visualize(self, save_dir: str = None) -> None:
         """
         Visualizes various statistics from the dataset using modern matplotlib styling.
+        Each plot is created as a separate figure so it can be saved individually.
 
-        Generates a 3x2 grid of plots including:
-        - Samples per style (horizontal bar)
-        - Time signature distribution (vertical bar)
-        - Total bars per style (vertical bar)
-        - Average bars per sample (vertical bar)
-        - Distribution of bar lengths (histogram + KDE)
-        - Beat vs Fill type distribution (donut pie chart)
-
-        Notes:
-            - Applies a clean, readable theme using plt.rcParams.
-            - Adds labels and legends for interpretability.
-            - Requires `scipy` for KDE; skips if unavailable.
+        Args:
+            save_dir: Optional directory to save each plot as a PNG. If None, plots are shown interactively.
         """
-        # --- Style Setup ---
+        import os
         plt.style.use('default')
         plt.rcParams.update({
             'font.size': 11,
@@ -578,88 +602,119 @@ class DataStats:
         styles = list(self.style_map.keys())
         modern_colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#FF8A80', '#80DEEA']
         color_cycle = itertools.cycle(modern_colors)
-        fig, axes = plt.subplots(3, 2, figsize=(20, 16), gridspec_kw={'height_ratios': [1.1, 1, 1]})
-        fig.suptitle(f'Dataset Analysis: {self.name}', fontsize=18, fontweight='bold', y=0.95)
-
-        # Helper styling
         label_kwargs = dict(fontweight='bold', fontsize=11)
-        for row in axes:
-            for ax in row:
-                ax.spines['top'].set_visible(False)
-                ax.spines['right'].set_visible(False)
+
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
 
         # --- Samples per Style (horizontal bar) ---
+        fig, ax = plt.subplots(figsize=(8, 6))
         counts = [self.style_map[style]['sample_count'] for style in styles]
         total_samples = sum(counts)
         percentages = [count / total_samples * 100 for count in counts]
         bar_colors = [next(color_cycle) for _ in styles]
-        bars = axes[0, 0].barh(styles, percentages, color=bar_colors, alpha=0.8, edgecolor='white', linewidth=1)
-        axes[0, 0].bar_label(bars, fmt='%.1f', padding=5, fontsize=10, fontweight='bold')
-        axes[0, 0].set_title("Samples per Style", **label_kwargs)
-        axes[0, 0].set_xlabel("Sample Count (%)", **label_kwargs)
-        axes[0, 0].invert_yaxis()
-        axes[0, 0].grid(axis='x')
+        bars = ax.barh(styles, percentages, color=bar_colors, alpha=0.8, edgecolor='white', linewidth=1)
+        ax.bar_label(bars, fmt='%.1f', padding=5, fontsize=10, fontweight='bold')
+        ax.set_title("Samples per Style", **label_kwargs)
+        ax.set_xlabel("Sample Count (%)", **label_kwargs)
+        ax.invert_yaxis()
+        ax.grid(axis='x')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        if save_dir:
+            fig.savefig(os.path.join(save_dir, 'samples_per_style.png'), bbox_inches='tight')
+            plt.close(fig)
+        else:
+            plt.show()
 
         # --- Time Signature Distribution (vertical bar) ---
+        fig, ax = plt.subplots(figsize=(8, 6))
         time_sig_counts = sum([Counter(self.style_map[style]['time_signatures']) for style in styles], Counter())
         total_time_sigs = sum(time_sig_counts.values())
         time_sig_percentages = [count / total_time_sigs * 100 for count in time_sig_counts.values()]
-        bars = axes[0, 1].bar(
+        bar_colors = modern_colors[:len(time_sig_counts)]
+        bars = ax.bar(
             range(len(time_sig_counts)),
             time_sig_percentages,
-            color=modern_colors[:len(time_sig_counts)],
+            color=bar_colors,
             alpha=0.8,
             edgecolor='white',
             linewidth=1
         )
-        axes[0, 1].bar_label(bars, fmt='%.1f', padding=3, fontsize=10, fontweight='bold')
-        axes[0, 1].set_title("Time Signature Distribution", **label_kwargs)
-        axes[0, 1].set_xticks(range(len(time_sig_counts)))
-        axes[0, 1].set_xticklabels(list(time_sig_counts.keys()), rotation=45, ha='right')
-        axes[0, 1].set_ylabel("Count (%)", **label_kwargs)
-        axes[0, 1].grid(axis='y')
+        ax.bar_label(bars, fmt='%.1f', padding=3, fontsize=10, fontweight='bold')
+        ax.set_title("Time Signature Distribution", **label_kwargs)
+        ax.set_xticks(range(len(time_sig_counts)))
+        ax.set_xticklabels(list(time_sig_counts.keys()), rotation=45, ha='right')
+        ax.set_ylabel("Count (%)", **label_kwargs)
+        ax.grid(axis='y')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        if save_dir:
+            fig.savefig(os.path.join(save_dir, 'time_signature_distribution.png'), bbox_inches='tight')
+            plt.close(fig)
+        else:
+            plt.show()
 
         # --- Total Bars per Style ---
+        fig, ax = plt.subplots(figsize=(8, 6))
         total_bars = [self.style_map[style]['bar_count'] for style in styles]
         total_all_bars = sum(total_bars)
         bar_percentages = [bars / total_all_bars * 100 for bars in total_bars]
-        bars = axes[1, 0].bar(
+        bar_colors = modern_colors[:len(styles)]
+        bars = ax.bar(
             styles,
             bar_percentages,
-            color=modern_colors[:len(styles)],
+            color=bar_colors,
             alpha=0.8,
             edgecolor='white',
             linewidth=1
         )
-        axes[1, 0].bar_label(bars, fmt='%.1f', padding=3, fontsize=10, fontweight='bold')
-        axes[1, 0].set_title("Total Bars per Style", **label_kwargs)
-        axes[1, 0].set_ylabel("Total Bars (%)", **label_kwargs)
-        axes[1, 0].set_xticks(range(len(styles)))
-        axes[1, 0].set_xticklabels(styles, rotation=45, ha='right')
-        axes[1, 0].grid(axis='y')
+        ax.bar_label(bars, fmt='%.1f', padding=3, fontsize=10, fontweight='bold')
+        ax.set_title("Total Bars per Style", **label_kwargs)
+        ax.set_ylabel("Total Bars (%)", **label_kwargs)
+        ax.set_xticks(range(len(styles)))
+        ax.set_xticklabels(styles, rotation=45, ha='right')
+        ax.grid(axis='y')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        if save_dir:
+            fig.savefig(os.path.join(save_dir, 'total_bars_per_style.png'), bbox_inches='tight')
+            plt.close(fig)
+        else:
+            plt.show()
 
         # --- Average Bars per Sample ---
+        fig, ax = plt.subplots(figsize=(8, 6))
         avg_bars = [self.style_map[style]['bar_count'] / self.style_map[style]['sample_count'] for style in styles]
-        bars = axes[1, 1].bar(
+        bar_colors = modern_colors[:len(styles)]
+        bars = ax.bar(
             styles,
             avg_bars,
-            color=modern_colors[:len(styles)],
+            color=bar_colors,
             alpha=0.8,
             edgecolor='white',
             linewidth=1
         )
-        axes[1, 1].bar_label(bars, fmt='%.1f', padding=3, fontsize=10, fontweight='bold')
-        axes[1, 1].set_title("Average Bars per Sample", **label_kwargs)
-        axes[1, 1].set_ylabel("Average Bars", **label_kwargs)
-        axes[1, 1].set_xticks(range(len(styles)))
-        axes[1, 1].set_xticklabels(styles, rotation=45, ha='right')
-        axes[1, 1].grid(axis='y')
+        ax.bar_label(bars, fmt='%.1f', padding=3, fontsize=10, fontweight='bold')
+        ax.set_title("Average Bars per Sample", **label_kwargs)
+        ax.set_ylabel("Average Bars", **label_kwargs)
+        ax.set_xticks(range(len(styles)))
+        ax.set_xticklabels(styles, rotation=45, ha='right')
+        ax.grid(axis='y')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        if save_dir:
+            fig.savefig(os.path.join(save_dir, 'average_bars_per_sample.png'), bbox_inches='tight')
+            plt.close(fig)
+        else:
+            plt.show()
 
         # --- Bar Length Histogram with KDE ---
+        fig, ax = plt.subplots(figsize=(8, 6))
         bar_counts = sum([Counter(self.style_map[style]['bars']) for style in styles], Counter())
         bar_list = np.repeat(list(bar_counts.keys()), list(bar_counts.values()))
         n_bins = min(15, len(set(bar_list)))
-        n, bins, patches = axes[2, 0].hist(
+        n, bins, patches = ax.hist(
             bar_list,
             bins=n_bins,
             color='#4ECDC4',
@@ -672,17 +727,24 @@ class DataStats:
             x_range = np.linspace(min(bar_list), max(bar_list), 100)
             bin_width = bins[1] - bins[0]
             kde_curve = kde(x_range) * len(bar_list) * bin_width
-            axes[2, 0].plot(x_range, kde_curve, color='#FF6B6B', linewidth=2, label='Density')
-            axes[2, 0].legend()
-
-        axes[2, 0].set_title("Distribution of Bar Lengths", **label_kwargs)
-        axes[2, 0].set_xlabel("Bar Length", **label_kwargs)
-        axes[2, 0].set_ylabel("Frequency", **label_kwargs)
-        axes[2, 0].grid(axis='y')
+            ax.plot(x_range, kde_curve, color='#FF6B6B', linewidth=2, label='Density')
+            ax.legend()
+        ax.set_title("Distribution of Bar Lengths", **label_kwargs)
+        ax.set_xlabel("Bar Length", **label_kwargs)
+        ax.set_ylabel("Frequency", **label_kwargs)
+        ax.grid(axis='y')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        if save_dir:
+            fig.savefig(os.path.join(save_dir, 'bar_length_distribution.png'), bbox_inches='tight')
+            plt.close(fig)
+        else:
+            plt.show()
 
         # --- Beat vs Fill Donut Chart ---
+        fig, ax = plt.subplots(figsize=(8, 6))
         type_counts = sum([Counter(self.style_map[style]['types']) for style in styles], Counter())
-        wedges, texts, autotexts = axes[2, 1].pie(
+        wedges, texts, autotexts = ax.pie(
             list(type_counts.values()),
             labels=None,
             autopct='%1.1f%%',
@@ -691,13 +753,12 @@ class DataStats:
             wedgeprops=dict(width=0.7, edgecolor='white', linewidth=2, alpha=0.8),
             textprops=dict(fontsize=11, fontweight='bold', color='white')
         )
-        axes[2, 1].set_title("Beat vs Fill Distribution", **label_kwargs)
-
+        ax.set_title("Beat vs Fill Distribution", **label_kwargs)
         legend_elements = [
             plt.Rectangle((0, 0), 1, 1, facecolor=modern_colors[i], alpha=0.8)
             for i in range(len(type_counts))
         ]
-        axes[2, 1].legend(
+        ax.legend(
             legend_elements,
             [f"{label} ({count:,})" for label, count in type_counts.items()],
             loc='center left',
@@ -707,10 +768,13 @@ class DataStats:
             title_fontsize=11,
             fontsize=10
         )
-
-        # --- Layout Adjustments ---
-        plt.tight_layout(rect=[0, 0, 0.95, 0.95])
-        plt.show()
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        if save_dir:
+            fig.savefig(os.path.join(save_dir, 'beat_vs_fill_distribution.png'), bbox_inches='tight')
+            plt.close(fig)
+        else:
+            plt.show()
 
     #### HELPER FUNCTIONS ################################
 
