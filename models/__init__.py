@@ -1,3 +1,3 @@
 from .GrooveIQ import GrooveIQ
-from .Sketch2Groove import Sketch2Groove
-__all__ = ["GrooveIQ", "Sketch2Groove"]
+from .Sketch2Groove import GrooveIQ_RNN
+__all__ = ["GrooveIQ", "GrooveIQ_RNN"]

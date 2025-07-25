@@ -313,8 +313,9 @@ class GrooveIQ_Trainer(BaseTrainer):
 
             # Save plots / midi / checkpoints
             self._save_midi_plots(train_plots, val_results, epoch)
-            self._save_attention_plot(train_plots['attn_weights']['self_attn'][0], epoch, attn_type="self")
-            self._save_attention_plot(train_plots['attn_weights']['cross_attn'][0], epoch, attn_type="cross")
+            if isinstance(self.model, GrooveIQ):
+                self._save_attention_plot(train_plots['attn_weights']['self_attn'][0], epoch, attn_type="self")
+                self._save_attention_plot(train_plots['attn_weights']['cross_attn'][0], epoch, attn_type="cross")
             self._save_midi(val_results, epoch)
             self.save_checkpoint('checkpoint-last-epoch-model.pth')
             
