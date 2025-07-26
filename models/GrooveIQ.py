@@ -224,13 +224,14 @@ class GrooveIQ(nn.Module):
         """
         B, T, num_buttons, M = button_hvo_target.shape
         D = self.align_proj.out_features
+        hit_mask = (button_hvo_target[:, :, :, 0] == 1).float()   # (B, T, num_buttons)
 
         # Project to shared alignment space
         target_proj = self.align_proj(button_hvo_target.view(B, T, num_buttons * M))  # (B, T, D)
         pred_proj   = self.align_proj(button_hvo_pred.view(B, T, num_buttons * M))    # (B, T, D)
 
         # Compute attention energies: pred aligns to target (monotonic)
-        energy = torch.matmul(pred_proj, target_proj.transpose(1, 2))  # (B, T, T)
+        energy = torch.einsum('btd,bsd->bts', pred_proj, target_proj)  # (B, T, T)
 
         # Mask future time steps
         monotonic_mask = torch.tril(torch.ones(T, T, device=energy.device))  # (T, T)
@@ -242,8 +243,18 @@ class GrooveIQ(nn.Module):
         # Expected target under alignment
         aligned_target = torch.matmul(alignment_probs, target_proj)  # (B, T, D)
 
-        # Match prediction to soft-aligned target
-        loss = F.mse_loss(aligned_target, pred_proj, reduction='mean')
+        # === Elementwise MSE ===
+        per_token_loss = F.mse_loss(pred_proj, aligned_target, reduction='none')  # (B, T, D)
+
+        # === Mask loss by hit_mask ===
+        # Average across D, then multiply mask (broadcasted) and compute mean
+        loss_mask = hit_mask.any(dim=2).float()  # (B, T), mark timesteps with any active button
+        masked_loss = per_token_loss.mean(dim=-1) * loss_mask  # (B, T)
+        
+        if loss_mask.sum() == 0:
+            return torch.tensor(0.0, device=button_hvo_target.device, requires_grad=True)
+
+        loss = masked_loss.sum() / loss_mask.sum()  # scalar
         return loss
 
 

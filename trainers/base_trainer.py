@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, Tuple
 from torchinfo import summary
 from utils import create_optimizer, create_scheduler
 from data import SampleData
-from models import GrooveIQ, GrooveIQ_RNN, Sketch2Groove
+from models import GrooveIQ, GrooveIQ_RNN, Sketch2Groove, GrooveIQ2
 
 
 class BaseTrainer(ABC):
@@ -143,15 +143,13 @@ class BaseTrainer(ABC):
                 model_summary = summary(self.model, input_size=input_size)
                 # Write the summary string to file
                 f.write(str(model_summary))
-            elif isinstance(self.model, Sketch2Groove):
+            elif isinstance(self.model, GrooveIQ2):
                 # Get a sample input shape from your model's expected input
                 batch_size = 8
                 input_size = (batch_size, self.model.T, self.model.E, self.model.M)
-                button_size = (batch_size, self.model.T, self.model.num_buttons, self.model.M)
+                button_size = (batch_size, self.model.T, self.model.num_buttons)
                 # Generate the summary
                 model_summary = summary(self.model, input_size=(input_size, button_size))
-                # Write the summary string to file
-                f.write(str(model_summary))
             else:
                 raise ValueError(f"Model type {type(self.model)} not supported")
 
