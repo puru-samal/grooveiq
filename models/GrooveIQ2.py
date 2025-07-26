@@ -27,7 +27,9 @@ class GrooveIQ2(nn.Module):
             encoder_depth=4, encoder_heads=4,
             decoder_depth=2, decoder_heads=4, 
             num_buttons=2,
-            is_causal: bool = True
+            is_causal: bool = True,
+            chunk_size: int = 3,
+            p: float = 0.5
     ):
         """
         Args:
@@ -55,6 +57,8 @@ class GrooveIQ2(nn.Module):
         self.decoder_depth = decoder_depth
         self.num_buttons   = num_buttons
         self.is_causal = is_causal
+        self.chunk_size = chunk_size
+        self.p = p
 
         self.sos_token = nn.Parameter(torch.randn(1, E, M))
         self.pos_emb   = PositionalEncoding(embed_dim, T)
@@ -88,6 +92,20 @@ class GrooveIQ2(nn.Module):
         
         self.output_projection = nn.Linear(embed_dim, E * M) # (B, T', D) -> (B, T', E*M)
 
+    def chunk_and_expand(self, tensor):
+        """
+        Args:
+            tensor: Tensor of shape (B, T, D)
+            chunk_size: int
+        Returns:
+            expanded: Tensor of shape (B, T_ * chunk_size, D)
+        """
+        B, T, D = tensor.shape
+        T_ = T // self.chunk_size
+        pooled = tensor[:, :T_ * self.chunk_size].view(B, T_, self.chunk_size, D).mean(dim=2) # (B, T_, D)
+        expanded = pooled.unsqueeze(2).repeat(1, 1, self.chunk_size, 1).view(B, T_ * self.chunk_size, D) # (B, T_ * chunk_size, D)
+        return expanded
+
     def encode(self, x, button_hits):
         """
         Args:
@@ -100,13 +118,16 @@ class GrooveIQ2(nn.Module):
         """
         B, T, E, M = x.shape
         encoded = self.encoder(x)                    # (B, T, E, D)
-        encoded = self.encoder_proj(encoded.view(B, T, E * self.embed_dim)) # (B, T, D)
+        encoded = self.encoder_proj(encoded.reshape(B, T, -1)) # (B, T, D)
     
         # Posterior network q(z | x, button_hits)
         button_embed, _ = self.button_embed(button_hits) # (B, T, D)
         button_embed = self.button_norm(button_embed)
+
+        enc_pooled = self.chunk_and_expand(encoded) # (B, T_, D)
+        btn_pooled = self.chunk_and_expand(button_embed) # (B, T_, D)
         
-        enc_mask_cat = torch.cat([encoded, button_embed], dim=-1)         # (B, T, 2 * D)
+        enc_mask_cat = torch.cat([enc_pooled, btn_pooled], dim=-1)        # (B, T, 2 * D)
         mu = self.z_mu_proj(enc_mask_cat)                                 # (B, T, z_dim)
         logvar = self.z_logvar_proj(enc_mask_cat).clamp(min=-10, max=10)  # (B, T, z_dim)
         std = torch.exp(0.5 * logvar)                                     # (B, T, z_dim)
@@ -114,9 +135,10 @@ class GrooveIQ2(nn.Module):
         z_post = mu + eps * std                                           # (B, T, z_dim)
 
         # Prior Network p(z_t | button_hits)
-        mask_embed, _ = self.latent_prior(button_embed)                       # (B, T, z_dim)
-        mu_prior = self.z_prior_mu(mask_embed)                                # (B, T, z_dim)
-        logvar_prior = self.z_prior_logvar(mask_embed).clamp(min=-10, max=10) # (B, T, z_dim)
+        prior_embed, _ = self.latent_prior(button_embed) # (B, T, z_dim)
+        prior_embed = self.chunk_and_expand(prior_embed) # (B, T, z_dim)
+        mu_prior = self.z_prior_mu(prior_embed)                                # (B, T, z_dim)
+        logvar_prior = self.z_prior_logvar(prior_embed).clamp(min=-10, max=10) # (B, T, z_dim)
 
         var = torch.exp(logvar)
         var_prior = torch.exp(logvar_prior)
@@ -182,9 +204,10 @@ class GrooveIQ2(nn.Module):
         button_hits = button_hits.float()                # (B, T, num_buttons)
         button_embed, _ = self.button_embed(button_hits) # (B, T, D)
         button_embed = self.button_norm(button_embed)
-        mask_embed, _ = self.latent_prior(button_embed)  # (B, T, z_dim)
-        mu_prior = self.z_prior_mu(mask_embed)    # (B, T, z_dim)
-        logvar_prior = self.z_prior_logvar(mask_embed).clamp(min=-10, max=10)  # (B, T, z_dim)
+        prior_embed, _ = self.latent_prior(button_embed) # (B, T, z_dim)
+        prior_embed = self.chunk_and_expand(prior_embed) # (B, T, z_dim)
+        mu_prior = self.z_prior_mu(prior_embed)          # (B, T, z_dim)
+        logvar_prior = self.z_prior_logvar(prior_embed).clamp(min=-10, max=10)  # (B, T, z_dim)
         std = torch.exp(0.5 * logvar_prior)             # (B, T, z_dim)
         eps = torch.randn_like(std)                     # (B, T, z_dim)
         z = mu_prior + eps * std                        # (B, T, z_dim)
@@ -202,7 +225,15 @@ class GrooveIQ2(nn.Module):
             attn_weights: Dictionary of attention weights
             kl_loss: Tensor of shape (B)
         """
-        z, _, kl_loss = self.encode(x, button_hits) # (B, T, z_dim), (B, T, z_dim), (B)
+        z_post, _, kl_loss = self.encode(x, button_hits) # (B, T, z_dim), (B, T, z_dim), (B)
+
+        # Scheduled sampling
+        z_prior = self.sample_z_from_button_hits(button_hits)
+        # Sample binary mask: 1 → use z_post, 0 → use z_prior
+        mask = torch.bernoulli(torch.full((x.shape[0], 1, 1), self.p, device=x.device))
+        z = mask * z_post + (1 - mask) * z_prior
+        
+        
         h_logits, v, o, attn_weights = self.decode(x, z) # (B, T, E), (B, T, E), (B, T, E)
         return {
                 'h_logits': h_logits, 
