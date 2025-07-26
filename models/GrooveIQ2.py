@@ -65,14 +65,15 @@ class GrooveIQ2(nn.Module):
                         )
         self.encoder_proj = nn.Linear(E * embed_dim, embed_dim)
         
-        self.button_embed = nn.GRU(num_buttons, embed_dim, batch_first=True)
+        self.button_embed = nn.LSTM(num_buttons, embed_dim, batch_first=True)
+        self.button_norm = nn.LayerNorm(embed_dim)
         
         # Posterior network q(z | x, button_mask)
         self.z_mu_proj     = nn.Linear(2 * embed_dim, z_dim)
         self.z_logvar_proj = nn.Linear(2 * embed_dim, z_dim)
 
         # Prior p(z|mask) via RNN
-        self.latent_prior    = nn.GRU(embed_dim, z_dim, batch_first=True)
+        self.latent_prior    = nn.LSTM(embed_dim, z_dim, batch_first=True)
         self.z_prior_mu      = nn.Linear(z_dim, z_dim)
         self.z_prior_logvar  = nn.Linear(z_dim, z_dim)
 
@@ -103,20 +104,25 @@ class GrooveIQ2(nn.Module):
     
         # Posterior network q(z | x, button_hits)
         button_embed, _ = self.button_embed(button_hits) # (B, T, D)
-        enc_mask_cat = torch.cat([encoded, button_embed], dim=-1)    # (B, T, 2 * D)
-        mu = self.z_mu_proj(enc_mask_cat)                            # (B, T, z_dim)
-        logvar = self.z_logvar_proj(enc_mask_cat)                    # (B, T, z_dim)
-        std = torch.exp(0.5 * logvar)                                # (B, T, z_dim)
-        eps = torch.randn_like(std)                                  # (B, T, z_dim)
-        z_post = mu + eps * std                                      # (B, T, z_dim)
+        button_embed = self.button_norm(button_embed)
+        
+        enc_mask_cat = torch.cat([encoded, button_embed], dim=-1)         # (B, T, 2 * D)
+        mu = self.z_mu_proj(enc_mask_cat)                                 # (B, T, z_dim)
+        logvar = self.z_logvar_proj(enc_mask_cat).clamp(min=-10, max=10)  # (B, T, z_dim)
+        std = torch.exp(0.5 * logvar)                                     # (B, T, z_dim)
+        eps = torch.randn_like(std)                                       # (B, T, z_dim)
+        z_post = mu + eps * std                                           # (B, T, z_dim)
 
         # Prior Network p(z_t | button_hits)
-        mask_embed, _ = self.latent_prior(button_embed) # (B, T, z_dim)
-        mu_prior = self.z_prior_mu(mask_embed)         # (B, T, z_dim)
-        logvar_prior = self.z_prior_logvar(mask_embed) # (B, T, z_dim)
+        mask_embed, _ = self.latent_prior(button_embed)                       # (B, T, z_dim)
+        mu_prior = self.z_prior_mu(mask_embed)                                # (B, T, z_dim)
+        logvar_prior = self.z_prior_logvar(mask_embed).clamp(min=-10, max=10) # (B, T, z_dim)
+
+        var = torch.exp(logvar)
+        var_prior = torch.exp(logvar_prior)
 
         kl = 0.5 * torch.sum(
-            logvar_prior - logvar + (logvar.exp() + (mu - mu_prior)**2) / logvar_prior.exp() - 1
+            logvar_prior - logvar + (var + (mu - mu_prior)**2) / (var_prior + 1e-6) - 1
         ) / (B * T)
 
         return z_post, mu, kl
@@ -175,9 +181,10 @@ class GrooveIQ2(nn.Module):
         """
         button_hits = button_hits.float()                # (B, T, num_buttons)
         button_embed, _ = self.button_embed(button_hits) # (B, T, D)
-        mask_embed, _ = self.latent_prior(button_embed)          # (B, T, z_dim)
+        button_embed = self.button_norm(button_embed)
+        mask_embed, _ = self.latent_prior(button_embed)  # (B, T, z_dim)
         mu_prior = self.z_prior_mu(mask_embed)    # (B, T, z_dim)
-        logvar_prior = self.z_prior_logvar(mask_embed)  # (B, T, z_dim)
+        logvar_prior = self.z_prior_logvar(mask_embed).clamp(min=-10, max=10)  # (B, T, z_dim)
         std = torch.exp(0.5 * logvar_prior)             # (B, T, z_dim)
         eps = torch.randn_like(std)                     # (B, T, z_dim)
         z = mu_prior + eps * std                        # (B, T, z_dim)
@@ -195,12 +202,8 @@ class GrooveIQ2(nn.Module):
             attn_weights: Dictionary of attention weights
             kl_loss: Tensor of shape (B)
         """
-        # ========== ENCODING ==========
-        z, mu, kl_loss = self.encode(x, button_hits) # (B, T, z_dim), (B, T, z_dim), (B)
-
-        # ========== DECODING ==========
+        z, _, kl_loss = self.encode(x, button_hits) # (B, T, z_dim), (B, T, z_dim), (B)
         h_logits, v, o, attn_weights = self.decode(x, z) # (B, T, E), (B, T, E), (B, T, E)
-
         return {
                 'h_logits': h_logits, 
                 'v': v, 
