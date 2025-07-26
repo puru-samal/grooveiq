@@ -5,7 +5,7 @@ import torch.nn as nn
 from tqdm import tqdm
 import torch.nn.functional as F
 from utils import ConstraintLosses, WeightScheduler
-from models import GrooveIQ
+from models import GrooveIQ2
 import torchaudio.functional as aF
 from data import DrumMIDIFeature
 import matplotlib.pyplot as plt
@@ -274,7 +274,7 @@ class GrooveIQ2_Trainer(BaseTrainer):
 
             # Save plots / midi / checkpoints
             self._save_midi_plots(train_plots, val_results, epoch)
-            if isinstance(self.model, GrooveIQ):
+            if isinstance(self.model, GrooveIQ2):
                 self._save_attention_plot(train_plots['attn_weights']['self_attn'][0], epoch, attn_type="self")
                 self._save_attention_plot(train_plots['attn_weights']['cross_attn'][0], epoch, attn_type="cross")
             self._save_midi(val_results, epoch)
