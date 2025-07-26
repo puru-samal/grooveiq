@@ -318,7 +318,8 @@ class GrooveIQ2_Trainer(BaseTrainer):
                 
                 grids, samples, button_hvo_target = batch['grid'].to(self.device), batch['samples'], batch['button_hvo']
                 button_hits = button_hvo_target[:, :, :, 0].to(self.device)
-                generated_grids, hit_probs = self.model.generate(button_hits, max_steps=max_length, threshold=self.threshold)
+                z, _, _ = self.model.encode(grids, button_hits)
+                generated_grids, hit_probs = self.model.generate(button_hits, z, max_steps=max_length, threshold=self.threshold)
 
                 torch.cuda.empty_cache()
 
