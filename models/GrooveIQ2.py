@@ -285,14 +285,13 @@ class GrooveIQ2(nn.Module):
         # Encode
         encoded, button_repr = self.encode(x) # (B, T, D), (B, T, num_buttons)
         button_penalty = self.calculate_button_penalty(button_repr)
-        button_repr = self.button_dropout(button_repr) # (B, T, num_buttons)
         
         # Button processing
         if button_hits is None:
             button_hits = self.make_button_hits(button_repr) # (B, T, num_buttons)
-            button_embed = self.make_button_embed(button_hits) # (B, T, D)
-        else:
-            button_embed = self.make_button_embed(button_hits) # (B, T, D)
+            
+        button_embed = self.make_button_embed(button_hits) # (B, T, D)
+        button_embed = self.button_dropout(button_embed) # (B, T, D)
         
         # Posterior network
         z_post, kl_loss = self.make_z_post(button_embed, encoded) # (B, T, z_dim), (B)

@@ -20,7 +20,7 @@ class GrooveIQ2_Trainer(BaseTrainer):
     """
     GrooveIQ (Groove Implicit Quantization Autoencoder) Trainer class that handles training, validation, and recognition loops.
     """
-    def __init__(self, model, config, run_name, config_file, device=None):
+    def __init__(self, model : GrooveIQ2, config : Dict, run_name : str, config_file : str, device : str = None):
         super().__init__(model, config, run_name, config_file, device)
         
         #  Loss weights
@@ -88,10 +88,15 @@ class GrooveIQ2_Trainer(BaseTrainer):
 
         for i, batch in enumerate(dataloader):
             grids, samples = batch['grid'].to(self.device), batch['samples']
+            if 'button_hvo' in batch:
+                button_hvo = batch['button_hvo'].to(self.device) # (B, T, num_buttons, M)
+                button_hits = button_hvo[:, :, :, 0] # (B, T, num_buttons)
+            else:
+                button_hvo = None
             h_true, v_true, o_true = grids[:, :, :, 0], grids[:, :, :, 1], grids[:, :, :, 2]
 
             with torch.autocast(device_type=self.device, dtype=torch.float16):
-                outputs  = self.model(grids)
+                outputs  = self.model(grids, button_hits)
                 h_logits = outputs['h_logits']
                 h_mask   = (torch.sigmoid(h_logits) > self.threshold).int()
                 v_pred   = outputs['v'] * h_mask
@@ -286,7 +291,7 @@ class GrooveIQ2_Trainer(BaseTrainer):
                 self._save_attention_plot(train_plots['attn_weights']['self_attn'][0], epoch, attn_type="self")
                 self._save_attention_plot(train_plots['attn_weights']['cross_attn'][0], epoch, attn_type="cross")
             self._save_midi(val_results, epoch)
-            self.save_checkpoint('checkpoint-last-epoch-model.pth')
+            self.save_checkpoint(f'checkpoint-ep{epoch}-model.pth')
             
             # Check if this is the best model
             if val_metrics['hit_acc'] > best_hit_acc:
@@ -325,8 +330,16 @@ class GrooveIQ2_Trainer(BaseTrainer):
             for i, batch in enumerate(dataloader):
                 
                 grids, samples = batch['grid'].to(self.device), batch['samples']
+                if 'button_hvo' in batch:
+                    button_hvo = batch['button_hvo'].to(self.device) # (B, T, num_buttons, M)
+                    button_hits = button_hvo[:, :, :, 0] # (B, T, num_buttons)
+                else:
+                    button_hvo = None
+                    button_hits = None
+                    
                 encoded, button_repr = self.model.encode(grids)
-                button_hits  = self.model.make_button_hits(button_repr)
+                if button_hits is None:
+                    button_hits  = self.model.make_button_hits(button_repr)
                 button_embed = self.model.make_button_embed(button_hits)
                 z_post, _ = self.model.make_z_post(button_embed, encoded)
                 generated_grids, hit_probs = self.model.generate(button_embed, z_post, max_steps=max_length, threshold=self.threshold)

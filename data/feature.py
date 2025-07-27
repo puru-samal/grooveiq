@@ -582,9 +582,19 @@ class DrumMIDIFeature:
                         button_hvo[t, button_e] = torch.tensor([1.0, velocity, offset])
         return button_hvo.float()
     
-    def simplify_to_button_hvo(self, steps_per_quarter=4, num_buttons=3,
-                           win_sizes=[(1, 0.1), (2, 0.5), (3, 0.15), (4, 0.25)],
-                           velocity_range=(0.5, 0.8), max_hits_per_win=1, win_retain_prob=0.8) -> torch.Tensor:
+    def simplify_to_button_hvo(
+            self, 
+            steps_per_quarter=4, 
+            num_buttons=3,
+            win_sizes=[(1, 0.1), (2, 0.5), (3, 0.15), (4, 0.25)],
+            velocity_range=(0.5, 0.8), 
+            max_hits_per_win=1, 
+            win_retain_prob=0.8,
+            timing_jitter=0.1,
+            velocity_jitter=0.1, 
+            miss_prob=0.05, 
+            spurious_prob=0.1
+    ) -> torch.Tensor:
         """
         Combines simplification and button HVO projection into a single pass.
         Returns:
@@ -624,9 +634,28 @@ class DrumMIDIFeature:
                 t = i + t_rel
                 b = inv_button_map[int(e)]
                 if b < num_buttons:
-                    if button_hvo[t, b, 1] < slice[t_rel, e, 1]:  # keep stronger hit
-                        button_hvo[t, b] = slice[t_rel, e]  # full HVO
+                    hvo = slice[t_rel, e].clone()
+                    # Add timing jitter to offset (clamp between -0.5 and 0.5)
+                    hvo[2] += random.uniform(-timing_jitter, timing_jitter)
+                    hvo[2] = max(min(hvo[2], 0.5), -0.5)
+                    # Add velocity jitter (up/down % variation)
+                    hvo[1] *= random.uniform(1 - velocity_jitter, 1 + velocity_jitter)
+                    hvo[1] = max(min(hvo[1], 1.0), 0.0)
 
+                    # Keep strongest hit
+                    if button_hvo[t, b, 1] < hvo[1]:
+                        if random.random() < miss_prob:
+                            button_hvo[t, b] = hvo
+
+            # Occasionally insert a spurious random hit
+            if random.random() < spurious_prob:
+                t_spurious = min(i + random.randint(0, win_size - 1), T - 1)
+                b_spurious = random.randint(0, num_buttons - 1)
+                button_hvo[t_spurious, b_spurious] = torch.tensor([
+                    1.0,
+                    random.uniform(0.2, 0.6),
+                    random.uniform(-timing_jitter, timing_jitter)
+                ], device=grid.device)
         return button_hvo
 
     
