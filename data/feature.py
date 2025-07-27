@@ -644,7 +644,7 @@ class DrumMIDIFeature:
 
                     # Keep strongest hit
                     if button_hvo[t, b, 1] < hvo[1]:
-                        if random.random() < miss_prob:
+                        if random.random() > miss_prob:
                             button_hvo[t, b] = hvo
 
             # Occasionally insert a spurious random hit
