@@ -160,12 +160,13 @@ class DrumMIDIDataset(Dataset):
                 if bh.shape[0] < T_max else bh
                 for bh in button_hvos
             ]
+        
 
         return {
             'grid': torch.stack(padded_grids),  # (B, T_max, E, M)
             'button_hvo': torch.stack(padded_button_hvos) if padded_button_hvos is not None else None,  # (B, T_max, num_buttons, M)
             'samples': list(samples),
-            'labels': torch.stack(desc_labels)
+            'labels': torch.stack(desc_labels) if desc_labels[0] is not None else None
         }
 
 
