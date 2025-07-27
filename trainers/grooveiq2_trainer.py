@@ -88,7 +88,7 @@ class GrooveIQ2_Trainer(BaseTrainer):
 
         for i, batch in enumerate(dataloader):
             grids, samples = batch['grid'].to(self.device), batch['samples']
-            if 'button_hvo' in batch:
+            if batch['button_hvo'] is not None:
                 button_hvo = batch['button_hvo'].to(self.device) # (B, T, num_buttons, M)
                 button_hits = button_hvo[:, :, :, 0] # (B, T, num_buttons)
             else:
@@ -330,7 +330,7 @@ class GrooveIQ2_Trainer(BaseTrainer):
             for i, batch in enumerate(dataloader):
                 
                 grids, samples = batch['grid'].to(self.device), batch['samples']
-                if 'button_hvo' in batch:
+                if batch['button_hvo'] is not None:
                     button_hvo = batch['button_hvo'].to(self.device) # (B, T, num_buttons, M)
                     button_hits = button_hvo[:, :, :, 0] # (B, T, num_buttons)
                 else:
