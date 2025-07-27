@@ -29,7 +29,9 @@ class GrooveIQ2(nn.Module):
             num_buttons=2,
             is_causal: bool = True,
             chunk_size: int = 3,
-            p: float = 0.5
+            p: float = 0.5,
+            button_penalty: int = 1,
+            button_dropout: float = 0.5,
     ):
         """
         Args:
@@ -44,6 +46,10 @@ class GrooveIQ2(nn.Module):
             decoder_heads (int): Number of attention heads.
             num_buttons (int): Number of buttons.
             is_causal (bool): Whether to use causal attention.
+            chunk_size (int): Chunk size for pooling.
+            p (float): Probability of using z_post instead of z_prior.
+            button_penalty (int): Penalty for button hits. 1 : L1, 2 : Group (L1 over T of L2(D))
+            button_dropout (float): Dropout probability for button hits.
         """
         super().__init__()
         
@@ -59,6 +65,8 @@ class GrooveIQ2(nn.Module):
         self.is_causal = is_causal
         self.chunk_size = chunk_size
         self.p = p
+        self.button_penalty = button_penalty
+        self.threshold = 0.5
 
         self.sos_token = nn.Parameter(torch.randn(1, E, M))
         self.pos_emb   = PositionalEncoding(embed_dim, T)
@@ -68,6 +76,8 @@ class GrooveIQ2(nn.Module):
                                 dim_heads=None, reversible=False
                         )
         self.encoder_proj = nn.Linear(E * embed_dim, embed_dim)
+        self.button_hit_repr  = nn.Linear(embed_dim, num_buttons) # (B, T, D) -> (B, T, num_buttons)
+        self.button_dropout   = nn.Dropout(p=button_dropout)
         
         self.button_embed = nn.LSTM(num_buttons, embed_dim, batch_first=True)
         self.button_norm = nn.LayerNorm(embed_dim)
@@ -81,8 +91,9 @@ class GrooveIQ2(nn.Module):
         self.z_prior_mu      = nn.Linear(z_dim, z_dim)
         self.z_prior_logvar  = nn.Linear(z_dim, z_dim)
 
-        self.dec_inp_proj      = nn.Linear(E * M, embed_dim) # (B, T', E*M) -> (B, T', D)
+        self.dec_inp_proj = nn.Linear(E * M, embed_dim) # (B, T', E*M) -> (B, T', D)
         self.dec_z_proj   = nn.Linear(z_dim, embed_dim) # (B, T', z_dim) -> (B, T', D)
+        self.dec_btn_proj = nn.Linear(embed_dim, embed_dim) # (B, T', D) -> (B, T', D)
         
         self.decoder = nn.TransformerDecoder(
             decoder_layer = TransformerDecoderLayer(d_model=embed_dim, nhead=decoder_heads, batch_first=True, norm_first=True),
@@ -106,27 +117,75 @@ class GrooveIQ2(nn.Module):
         expanded = pooled.unsqueeze(2).repeat(1, 1, self.chunk_size, 1).view(B, T_ * self.chunk_size, D) # (B, T_ * chunk_size, D)
         return expanded
 
-    def encode(self, x, button_hits):
+    def encode(self, x):
         """
         Args:
             x: Tensor of shape (B, T, E, M)
-            button_hits: Binary hit mask of shape (B, T, num_buttons)
         Returns:
-            z: Tensor of shape (B, T, z_dim)
-            mu: Tensor of shape (B, T, z_dim)
-            kl_loss: scalar
+            encoded: Tensor of shape (B, T, D)
+            button_repr: Tensor of shape (B, T, num_buttons)
         """
         B, T, E, M = x.shape
         encoded = self.encoder(x)                    # (B, T, E, D)
         encoded = self.encoder_proj(encoded.reshape(B, T, -1)) # (B, T, D)
+        button_repr = self.button_hit_repr(encoded) # (B, T, num_buttons)
+        return encoded, button_repr
     
-        # Posterior network q(z | x, button_hits)
+    def calculate_button_penalty(self, button_repr):
+        """
+        Args:
+            button_repr: Tensor of shape (B, T, num_buttons)
+        Returns:
+            button_penalty: Tensor of shape (B, T)
+        """
+        if self.button_penalty == 1:
+            return button_repr.abs().sum(dim=2).mean()
+        elif self.button_penalty == 2:
+            return torch.norm(button_repr, dim=2).mean()
+        else:
+            raise ValueError(f"Invalid button penalty: {self.button_penalty}")
+    
+    def straight_through_binarize(self, x, threshold=0.5):
+        """Applies hard threshold during forward, identity gradient during backward."""
+        hard = (x > threshold).float()
+        return x + (hard - x).detach()
+    
+    def make_button_hits(self, button_repr):
+        """
+        Args:
+            button_repr: Tensor of shape (B, T, num_buttons)
+        Returns:
+            button_hits: Tensor of shape (B, T, num_buttons)
+        """
+        button_hits = torch.sigmoid(button_repr)
+        return self.straight_through_binarize(button_hits)
+    
+    def make_button_embed(self, button_hits):
+        """
+        Args:
+            button_hits: Tensor of shape (B, T, num_buttons)
+        Returns:
+            button_embed: Tensor of shape (B, T, D)
+        """
         button_embed, _ = self.button_embed(button_hits) # (B, T, D)
-        button_embed = self.button_norm(button_embed)
+        button_embed = self.button_norm(button_embed)    # (B, T, D)
+        return button_embed
 
-        enc_pooled = self.chunk_and_expand(encoded) # (B, T_, D)
+    def make_z_post(self, button_embed, encoded):
+        """
+        Args:
+            button_embed: Tensor of shape (B, T, D)
+        Returns:
+            z_post: Tensor of shape (B, T, z_dim)
+            button_embed: Tensor of shape (B, T, D)
+            kl_loss: Tensor of shape (B)
+        """
+        B, T, _ = button_embed.shape
+
+        enc_pooled = self.chunk_and_expand(encoded)      # (B, T_, D)
         btn_pooled = self.chunk_and_expand(button_embed) # (B, T_, D)
         
+        # Posterior Network q(z | x, button_hits)
         enc_mask_cat = torch.cat([enc_pooled, btn_pooled], dim=-1)        # (B, T, 2 * D)
         mu = self.z_mu_proj(enc_mask_cat)                                 # (B, T, z_dim)
         logvar = self.z_logvar_proj(enc_mask_cat).clamp(min=-10, max=10)  # (B, T, z_dim)
@@ -147,14 +206,14 @@ class GrooveIQ2(nn.Module):
             logvar_prior - logvar + (var + (mu - mu_prior)**2) / (var_prior + 1e-6) - 1
         ) / (B * T)
 
-        return z_post, mu, kl
+        return z_post, kl
 
-    def decode(self, input, z):
+    def decode(self, input, z, button_embed):
         """
         Args:
             input: Tensor of shape  (B, T, E, M)
-            button_hvo: Tensor of shape (B, T, num_buttons, M)
             z: Tensor of shape (B, T, z_dim)
+            button_embed: Tensor of shape (B, T, D)
         Returns:
             h: Tensor of shape (B, T, E)
             v: Tensor of shape (B, T, E)
@@ -169,7 +228,8 @@ class GrooveIQ2(nn.Module):
         target = self.pos_emb(target) # (B, T', D)
         target_causal_mask = CausalMask(target) # (T', T')
         
-        memory = self.dec_z_proj(z)  # (B, T', D)
+        # Memory
+        memory = self.dec_z_proj(z) + self.dec_btn_proj(button_embed)  # (B, T', D)
         memory = self.pos_emb(memory)     # (B, T', D)
         memory_causal_mask = CausalMask(memory) if self.is_causal else None # (T', T')
 
@@ -194,16 +254,13 @@ class GrooveIQ2(nn.Module):
         }
         return h_logits, v, o, attn_weights
     
-    def sample_z_from_button_hits(self, button_hits):
+    def sample_z_from_button_embed(self, button_embed):
         """
         Args:
-            button_hits: Tensor of shape (B, T, num_buttons)
+            button_embed: Tensor of shape (B, T, D)
         Returns:
             z: Tensor of shape (B, T, z_dim)
         """
-        button_hits = button_hits.float()                # (B, T, num_buttons)
-        button_embed, _ = self.button_embed(button_hits) # (B, T, D)
-        button_embed = self.button_norm(button_embed)
         prior_embed, _ = self.latent_prior(button_embed) # (B, T, z_dim)
         prior_embed = self.chunk_and_expand(prior_embed) # (B, T, z_dim)
         mu_prior = self.z_prior_mu(prior_embed)          # (B, T, z_dim)
@@ -213,11 +270,11 @@ class GrooveIQ2(nn.Module):
         z = mu_prior + eps * std                        # (B, T, z_dim)
         return z
 
-    def forward(self, x, button_hits):
+    def forward(self, x, button_hits=None):
         """
         Args:
             x: Tensor of shape (B, T, E, M)
-            button_hits: Tensor of shape (B, T, num_buttons)
+            button_hits: Tensor of shape (B, T, num_buttons) (optional)
         Returns:
             h_logits: Tensor of shape (B, T, E)
             v: Tensor of shape (B, T, E)
@@ -225,44 +282,64 @@ class GrooveIQ2(nn.Module):
             attn_weights: Dictionary of attention weights
             kl_loss: Tensor of shape (B)
         """
-        z_post, _, kl_loss = self.encode(x, button_hits) # (B, T, z_dim), (B, T, z_dim), (B)
+        # Encode
+        encoded, button_repr = self.encode(x) # (B, T, D), (B, T, num_buttons)
+        button_penalty = self.calculate_button_penalty(button_repr)
+        button_repr = self.button_dropout(button_repr) # (B, T, num_buttons)
+        
+        # Button processing
+        if button_hits is None:
+            button_hits = self.make_button_hits(button_repr) # (B, T, num_buttons)
+            button_embed = self.make_button_embed(button_hits) # (B, T, D)
+        else:
+            button_embed = self.make_button_embed(button_hits) # (B, T, D)
+        
+        # Posterior network
+        z_post, kl_loss = self.make_z_post(button_embed, encoded) # (B, T, z_dim), (B)
 
-        # Scheduled sampling
-        z_prior = self.sample_z_from_button_hits(button_hits)
-        # Sample binary mask: 1 → use z_post, 0 → use z_prior
+        # Scheduled sampling from prior network: 1 → use z_post, 0 → use z_prior
+        z_prior = self.sample_z_from_button_embed(button_embed)
         mask = torch.bernoulli(torch.full((x.shape[0], 1, 1), self.p, device=x.device))
-        z = mask * z_post + (1 - mask) * z_prior
+        z = mask * z_post + (1 - mask) * z_prior 
         
+        # Decode
+        h_logits, v, o, attn_weights = self.decode(x, z, button_embed) # (B, T, E), (B, T, E), (B, T, E)
+
+        # Button HVO (for visualization)
+        button_hvo = torch.cat([button_hits.unsqueeze(-1),  torch.zeros_like(button_hits).unsqueeze(-1).repeat(1, 1, 1, self.M - 1)], dim=-1) # (B, T, num_buttons, M)
         
-        h_logits, v, o, attn_weights = self.decode(x, z) # (B, T, E), (B, T, E), (B, T, E)
         return {
                 'h_logits': h_logits, 
                 'v': v, 
-                'o': o, 
+                'o': o,
+                'button_hvo': button_hvo,
                 'attn_weights': attn_weights, 
                 'kl_loss': kl_loss, 
+                'button_penalty': button_penalty,
             }
     
-    def generate(self, button_hits, z=None, max_steps=None, threshold=0.5):
+    def generate(self, button_embed, z=None, max_steps=None, threshold=None):
         """
         Generate a prediction for the input at time t, given input < t, button HVO <= t, and latent vector z.
         Args:
-            button_hits: Tensor of shape (B, T, num_buttons)
-            z: Tensor of shape (B, z_dim)
+            z: Tensor of shape (B, T, z_dim)
+            button_embed: Tensor of shape (B, T, D)
             max_steps: int (optional)
         Returns:
             hvo_pred: Tensor of shape (B, T, E, 3)
             hit_logits: Tensor of shape (B, T, E) for threshold calculation
         """
-        B, T, num_buttons = button_hits.shape
+        B, T, _ = button_embed.shape
         E = self.E
         T_gen = int(max_steps or T)
 
+        if threshold is None:
+            threshold = self.threshold
+
         generated = self.sos_token.unsqueeze(0).repeat(B, 1, 1, 1) # (B, 1, E, M)
         hit_probs = []
-        
         if z is None:
-            z = self.sample_z_from_button_hits(button_hits) # (B, T, z_dim)
+            z = self.sample_z_from_button_embed(button_embed)
         
         for t in range(T_gen):
 
@@ -272,9 +349,9 @@ class GrooveIQ2(nn.Module):
             
             # Memory
             if self.is_causal:
-                mem_embed = self.dec_z_proj(z[:, :t + 1]) # (B, T, D)
+                mem_embed = self.dec_z_proj(z[:, :t + 1]) + self.dec_btn_proj(button_embed[:, :t + 1]) # (B, T, D)
             else:
-                mem_embed = self.dec_z_proj(z) # (B, T, D)
+                mem_embed = self.dec_z_proj(z) + self.dec_btn_proj(button_embed) # (B, T, D)
             mem_embed_pos = self.pos_emb(mem_embed)
             
             # Mask
@@ -310,7 +387,7 @@ class GrooveIQ2(nn.Module):
         return generated, torch.stack(hit_probs, dim=1) # (B, T, E)
 
 if __name__ == "__main__":
-    input_size = [(4, 33, 9, 3), (4, 33, 2)]
+    input_size = [(4, 33, 9, 3)]
     encoder = GrooveIQ2(
         T=33, E=9, M=3, z_dim=64,
         embed_dim=128, encoder_depth=2, encoder_heads=4, 
