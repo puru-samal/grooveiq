@@ -93,6 +93,7 @@ class GrooveIQ2_Trainer(BaseTrainer):
                 button_hits = button_hvo[:, :, :, 0] # (B, T, num_buttons)
             else:
                 button_hvo = None
+                button_hits = None
             h_true, v_true, o_true = grids[:, :, :, 0], grids[:, :, :, 1], grids[:, :, :, 2]
 
             with torch.autocast(device_type=self.device, dtype=torch.float16):
