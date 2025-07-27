@@ -18,6 +18,7 @@ class DrumMIDIDataset(Dataset):
                  subset: float = 1.0,
                  aug_config: Dict = None,
                  verbose: bool = False,
+                 calc_desc: bool = True,
         ):
         """
         Initialize the dataset.
@@ -30,6 +31,7 @@ class DrumMIDIDataset(Dataset):
             subset: Fraction of the dataset to load
             aug_config: Configuration for data augmentation
             verbose: Whether to print verbose output
+            calc_desc: Whether to calculate feature descriptors.
         """
         self.data_path = path
         self.data_stats = DataStats()
@@ -39,7 +41,8 @@ class DrumMIDIDataset(Dataset):
         self.steps_per_quarter = steps_per_quarter
         self.aug_config = aug_config
         assert self.feature_type in ["fixed", "flexible"], "Invalid feature type"
-
+        self.calc_desc = calc_desc
+        
         print(f"Loading dataset from: {self.data_path}...")
         with open(self.data_path, "rb") as f:
             pickle_data = pickle.load(f)
@@ -52,7 +55,7 @@ class DrumMIDIDataset(Dataset):
         pbar = tqdm(pickle_data, desc="Accumulating:", unit="sample")
         for sample in pbar:
             try:
-                self.data_stats.accumulate_dict(sample)
+                self.data_stats.accumulate_dict(sample, calc_desc=self.calc_desc)
             except Exception as e:
                 print(f"Error processing sample: {e}")
                 print(f"Sample: {sample}")
@@ -99,6 +102,7 @@ class DrumMIDIDataset(Dataset):
 
         if self.feature_type == "fixed":
             grid, _ = sample.feature.to_fixed_grid(steps_per_quarter=self.steps_per_quarter)
+            button_hvo, desc_label = None, None
             
             if self.aug_config is not None:
                 button_hvo = sample.feature.simplify_to_button_hvo(
@@ -109,14 +113,20 @@ class DrumMIDIDataset(Dataset):
                     max_hits_per_win=self.aug_config["max_hits_per_win"], 
                     win_retain_prob=self.aug_config["win_retain_prob"]
                 )
-            else:
-                button_hvo = None
-            desc_label, _ = sample.descriptors.get_feature_vector()
+            
+            if sample.descriptors is not None:
+                desc_label, _ = sample.descriptors.get_feature_vector()
+            
             return sample, grid, button_hvo, desc_label
+        
         elif self.feature_type == "flexible":
             grid, _ = sample.feature.to_flexible_grid(max_hits_per_class=self.data_stats.max_hits_per_class, steps_per_quarter=self.steps_per_quarter)
-            desc_label, _ = sample.descriptors.get_feature_vector()
-            return sample, grid, desc_label
+            button_hvo, desc_label = None, None
+            
+            if sample.descriptors is not None:
+                desc_label, _ = sample.descriptors.get_feature_vector()
+            
+            return sample, grid, button_hvo, desc_label
         
     
     

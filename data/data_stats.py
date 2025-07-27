@@ -197,7 +197,7 @@ class DataStats:
         self._compute_max_hits_per_class(sample.feature)
         self.all_samples.append(sample)
 
-    def accumulate_dict(self, data: dict) -> None:
+    def accumulate_dict(self, data: dict, calc_desc: bool = True) -> None:
         """
         Accumulate statistics for a single sample from a dictionary.
         Args:
@@ -212,6 +212,7 @@ class DataStats:
                         'metadata': List[str],
                         'midi_bytes': bytes
                     }
+            calc_desc: Whether to calculate feature descriptors.
         """
         self.num_samples += 1
         style = data['style']
@@ -252,7 +253,7 @@ class DataStats:
             midi_bytes=data['midi_bytes'],
             num_bars=num_bars,
             feature=feature,
-            descriptors=FeatureDescriptors(feature),
+            descriptors=FeatureDescriptors(feature) if calc_desc else None,
         ))
 
     def get_pos_neg_counts(self, steps_per_quarter: int) -> Tuple[int, int]:
