@@ -20,7 +20,7 @@ class GrooveIQ_Trainer(BaseTrainer):
     """
     GrooveIQ (Groove Implicit Quantization Autoencoder) Trainer class that handles training, validation, and recognition loops.
     """
-    def __init__(self, model, config, run_name, config_file, device=None):
+    def __init__(self, model : GrooveIQ, config : Dict, run_name : str, config_file : str, device : str = None):
         super().__init__(model, config, run_name, config_file, device)
         
         #  Loss weights
@@ -28,36 +28,17 @@ class GrooveIQ_Trainer(BaseTrainer):
         self.hit_penalty = config['loss'].get('hit_penalty', 1.0)
         self.threshold   = config['loss'].get('threshold', 0.5)
         self.recons_weight = config['loss'].get('recons_weight', 1.0)
-        self.vo_weight     = config['loss'].get('vo_weight', 1.0)
         self.kld_weight    = config['loss'].get('kld_weight', 0.0)
-        self.constraint_weight = config['loss'].get('constraint_weight', 0.0)
-        self.sup_weight        = config['loss'].get('sup_weight', 0.0)
-        self.heuristic_weight  = config['loss'].get('heuristic_weight', 0.0)
+        self.distill_weight = config['loss'].get('distill_weight', 0.0)
+        self.button_penalty_weight = config['loss'].get('button_penalty_weight', 0.0)
         
         # Reconstruction losses
         self.hit_loss      = nn.BCEWithLogitsLoss(reduction='none', pos_weight=torch.tensor(self.pos_weight))
         self.velocity_loss = nn.MSELoss(reduction='none')
         self.offset_loss   = nn.MSELoss(reduction='none')
 
-        # Constraint losses
-        latent_loss_type = self.config['loss'].get('latent_loss_type', 'none')
-        latent_loss_dim  = self.config['loss'].get('latent_loss_dim', -1)
-        
-        if latent_loss_type == 'l1_sparsity_time':
-            self.latent_loss = lambda x: ConstraintLosses().l1_sparsity_time(x, dim=latent_loss_dim)
-        elif latent_loss_type == 'l2_sparsity_time':
-            self.latent_loss = lambda x: ConstraintLosses().l2_sparsity_time(x, dim=latent_loss_dim)
-        elif latent_loss_type == 'elastic_sparsity_time':
-            self.latent_loss = lambda x: ConstraintLosses().l1_sparsity_time(x, dim=latent_loss_dim) + \
-                                        ConstraintLosses().l2_sparsity_time(x, dim=latent_loss_dim)
-        else:
-            if latent_loss_type != 'none':
-                raise ValueError(f"Invalid latent loss type: {latent_loss_type}")
-            self.latent_loss = lambda x: torch.tensor(0.0, device=x.device)
-
         # Weight scheduler
         self.kl_weight_scheduler = None # Init it before training
-        print(f"Using latent loss type: {latent_loss_type} at dim: {latent_loss_dim}")
 
 
     def set_optimizer(self, optimizer) -> None:
@@ -81,11 +62,9 @@ class GrooveIQ_Trainer(BaseTrainer):
         batch_bar = tqdm(total=len(dataloader), dynamic_ncols=True, leave=False, position=0, desc="[Training GrooveIQ]")
 
         # Initialize accumulators
-        running_latent_penalty = 0.0
         running_kld_loss = 0.0
-        running_vo_penalty = 0.0
-        running_sup_loss = 0.0
-        running_heuristic_loss = 0.0
+        running_distill_loss = 0.0
+        running_button_penalty = 0.0
         running_joint_loss = 0.0
         running_sample_count = 0
         
@@ -110,26 +89,26 @@ class GrooveIQ_Trainer(BaseTrainer):
             kl_weight = self.kld_weight
 
         for i, batch in enumerate(dataloader):
-            grids, samples, labels, button_hvo_target = batch['grid'].to(self.device), batch['samples'], batch['labels'], batch['button_hvo']
-            if labels is not None:
-                labels = labels.float().to(self.device)
-            if button_hvo_target is not None: # For RNN models
-                button_hvo_target = button_hvo_target.to(self.device)
+            grids, samples = batch['grid'].to(self.device), batch['samples']
+            if batch['button_hvo'] is not None:
+                button_hvo = batch['button_hvo'].to(self.device) # (B, T, num_buttons, M)
+                button_hits = button_hvo[:, :, :, 0] # (B, T, num_buttons)
+            else:
+                button_hvo = None
+                button_hits = None
             h_true, v_true, o_true = grids[:, :, :, 0], grids[:, :, :, 1], grids[:, :, :, 2]
 
             with torch.autocast(device_type=self.device, dtype=torch.float16):
-                outputs  = self.model(grids, labels, button_hvo_target)
+                outputs  = self.model(grids, button_hits)
                 h_logits = outputs['h_logits']
                 h_mask   = (torch.sigmoid(h_logits) > self.threshold).int()
                 v_pred   = outputs['v'] * h_mask
                 o_pred   = outputs['o'] * h_mask
-                button_latent = outputs['button_latent']
                 button_hvo    = outputs['button_hvo']
                 attn_weights  = outputs['attn_weights']
-                vo_penalty    = outputs['vo_penalty']
                 kl_loss  = outputs['kl_loss']
-                sup_loss = outputs['sup_loss']
-                heuristic_loss = outputs['heuristic_loss']
+                distill_loss = outputs['distill_loss']
+                button_penalty = outputs['button_penalty']
 
                 # Hit penalty for penalizing velocity/offset when there is no hit
                 hit_penalty = torch.where(h_true == 1, self.hit_penalty, 0.0)
@@ -139,16 +118,11 @@ class GrooveIQ_Trainer(BaseTrainer):
                 velocity_mse = (self.velocity_loss(v_pred, v_true) * hit_penalty).mean()
                 offset_mse = (self.offset_loss(o_pred, o_true) * hit_penalty).mean()
 
-                # Constraint losses
-                latent_penalty = self.latent_loss(button_latent)
-
                 # Joint loss
                 joint_loss = self.recons_weight * (hit_bce + velocity_mse + offset_mse) + \
-                             self.constraint_weight * latent_penalty + \
                              kl_weight * kl_loss + \
-                             self.sup_weight * sup_loss + \
-                             self.heuristic_weight * heuristic_loss + \
-                             vo_penalty * self.vo_weight
+                             self.distill_weight * distill_loss + \
+                             self.button_penalty_weight * button_penalty
 
             # Compute hit metrics
             hit_pred_int = (torch.sigmoid(h_logits) > self.threshold).int()
@@ -169,11 +143,9 @@ class GrooveIQ_Trainer(BaseTrainer):
             running_hit_bce += hit_bce.item() * batch_size
             running_velocity_mse += velocity_mse.item() * batch_size
             running_offset_mse += offset_mse.item() * batch_size
-            running_vo_penalty += vo_penalty.item() * batch_size
-            running_latent_penalty += latent_penalty.item() * batch_size
             running_kld_loss += kl_loss.item() * batch_size
-            running_sup_loss += sup_loss.item() * batch_size
-            running_heuristic_loss += heuristic_loss.item() * batch_size
+            running_distill_loss += distill_loss.item() * batch_size
+            running_button_penalty += button_penalty.item() * batch_size
             running_joint_loss += joint_loss.item() * batch_size
             running_hit_acc += hit_acc * batch_size
             running_hit_ppv += hit_ppv * batch_size
@@ -197,11 +169,9 @@ class GrooveIQ_Trainer(BaseTrainer):
             avg_hit_perplexity = running_hit_perplexity / running_sample_count
             avg_velocity_mse = running_velocity_mse / running_sample_count
             avg_offset_mse = running_offset_mse / running_sample_count
-            avg_latent_penalty = running_latent_penalty / running_sample_count
             avg_kld_loss = running_kld_loss / running_sample_count
-            avg_sup_loss = running_sup_loss / running_sample_count
-            avg_heuristic_loss = running_heuristic_loss / running_sample_count
-            avg_vo_penalty = running_vo_penalty / running_sample_count
+            avg_distill_loss = running_distill_loss / running_sample_count
+            avg_button_penalty = running_button_penalty / running_sample_count
             avg_joint_loss = running_joint_loss / running_sample_count
             avg_hit_acc = running_hit_acc / running_sample_count
             avg_hit_ppv = running_hit_ppv / running_sample_count
@@ -217,11 +187,9 @@ class GrooveIQ_Trainer(BaseTrainer):
                 h_perplexity=f"{avg_hit_perplexity:.4f}",
                 v_mse=f"{avg_velocity_mse:.4f}",
                 o_mse=f"{avg_offset_mse:.4f}",
-                vo_penalty=f"{avg_vo_penalty:.4f}",
-                latent_penalty=f"{avg_latent_penalty:.4f}",
                 kld_loss=f"{avg_kld_loss:.4f}",
-                sup_loss=f"{avg_sup_loss:.4f}",
-                heuristic_loss=f"{avg_heuristic_loss:.4f}",
+                distill_loss=f"{avg_distill_loss:.4f}",
+                button_penalty=f"{avg_button_penalty:.4f}",
                 joint=f"{avg_joint_loss:.4f}",
                 kl_weight=f"{kl_weight:.4f}",
                 acc_step=f"{(i % self.config['training']['gradient_accumulation_steps']) + 1}/{self.config['training']['gradient_accumulation_steps']}"
@@ -251,19 +219,17 @@ class GrooveIQ_Trainer(BaseTrainer):
             'hit_bce': running_hit_bce / running_sample_count,
             'velocity_mse': running_velocity_mse / running_sample_count,
             'offset_mse': running_offset_mse / running_sample_count,
-            'latent_penalty': running_latent_penalty / running_sample_count,
+            'button_penalty': running_button_penalty / running_sample_count,
             'kld_loss': running_kld_loss / running_sample_count,
-            'sup_loss': running_sup_loss / running_sample_count,
-            'vo_penalty': running_vo_penalty / running_sample_count,
-            'heuristic_loss': running_heuristic_loss / running_sample_count,
+            'distill_loss': running_distill_loss / running_sample_count,
             'joint_loss': running_joint_loss / running_sample_count,
             'kl_weight': kl_weight,
         }
 
         # Plotting
         to_plots = {
-            'samples': samples,          # List of SampleData objects
-            'button_hvo': button_hvo,    # Button HVO corresponding to samples  (B, T, num_buttons, M)
+            'samples': samples,               # List of SampleData objects
+            'button_hvo': button_hvo,  # Button HVO corresponding to samples  (B, T, num_buttons, M)
             'attn_weights': attn_weights # Attention weights (B, T', T')
         }
 
@@ -315,6 +281,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             train_metrics, train_plots = self._train_epoch(train_dataloader)
             val_metrics, val_results = self._validate_epoch(val_dataloader, num_batches=10)
             self.threshold = val_metrics['optimal_threshold']
+            self.model.threshold = self.threshold
 
             # Step ReduceLROnPlateau scheduler with validation loss
             if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -329,11 +296,10 @@ class GrooveIQ_Trainer(BaseTrainer):
 
             # Save plots / midi / checkpoints
             self._save_midi_plots(train_plots, val_results, epoch)
-            if isinstance(self.model, GrooveIQ):
-                self._save_attention_plot(train_plots['attn_weights']['self_attn'][0], epoch, attn_type="self")
-                self._save_attention_plot(train_plots['attn_weights']['cross_attn'][0], epoch, attn_type="cross")
+            self._save_attention_plot(train_plots['attn_weights']['self_attn'][0], epoch, attn_type="self")
+            self._save_attention_plot(train_plots['attn_weights']['cross_attn'][0], epoch, attn_type="cross")
             self._save_midi(val_results, epoch)
-            self.save_checkpoint('checkpoint-last-epoch-model.pth')
+            self.save_checkpoint(f'checkpoint-ep{epoch}-model.pth')
             
             # Check if this is the best model
             if val_metrics['hit_acc'] > best_hit_acc:
@@ -372,10 +338,20 @@ class GrooveIQ_Trainer(BaseTrainer):
             for i, batch in enumerate(dataloader):
                 
                 grids, samples = batch['grid'].to(self.device), batch['samples']
-                button_latent, z, _, _ = self.model.encode(grids)
-                button_hvo, _ = self.model.make_button_hvo(button_latent)
-                generated_grids, hit_probs = self.model.generate(button_hvo, z, max_steps=max_length, threshold=self.threshold)
-
+                if batch['button_hvo'] is not None:
+                    button_hvo = batch['button_hvo'].to(self.device) # (B, T, num_buttons, M)
+                    button_hits = button_hvo[:, :, :, 0] # (B, T, num_buttons)
+                else:
+                    button_hvo = None
+                    button_hits = None
+                    
+                encoded, button_repr = self.model.encode(grids)
+                if button_hits is None:
+                    button_hits  = self.model.make_button_hits(button_repr)
+                button_embed = self.model.make_button_embed(button_hits)
+                z_post, _, _ = self.model.make_z_post(button_embed, encoded)
+                generated_grids, hit_probs = self.model.generate(button_embed, z_post, max_steps=max_length, threshold=self.threshold)
+                button_hvo = torch.cat([button_hits.unsqueeze(-1),  torch.zeros_like(button_hits).unsqueeze(-1).repeat(1, 1, 1, self.model.M - 1)], dim=-1) # (B, T, num_buttons, M)
                 torch.cuda.empty_cache()
 
                 # Post process sequences: 

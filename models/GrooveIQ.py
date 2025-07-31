@@ -8,7 +8,6 @@ from .sub_modules import (
     DrumAxialTransformer, 
     PositionalEncoding, 
     CausalMask, 
-    LearnableBinsQuantizer,
     TransformerDecoderLayer
 )
 
@@ -24,12 +23,15 @@ class GrooveIQ(nn.Module):
     def __init__(
             self, 
             T=33, E=9, M=3,
-            z_dim=64, supervised_dim=0,
-            embed_dim=128, encoder_depth=4, encoder_heads=4,
+            z_dim=64, embed_dim=128, 
+            encoder_depth=4, encoder_heads=4,
             decoder_depth=2, decoder_heads=4, 
-            num_buttons=2, num_bins_velocity=8, num_bins_offset=16,
-            monotonic_alignment='hard', 
-            button_type: Literal['Causal', 'Non-Causal'] = 'Causal'
+            num_buttons=2,
+            is_causal: bool = True,
+            chunk_size: int = 3,
+            p: float = 0.5,
+            button_penalty: int = 1,
+            button_dropout: float = 0.5,
     ):
         """
         Args:
@@ -37,17 +39,17 @@ class GrooveIQ(nn.Module):
             E (int): Number of drum instruments.
             M (int): Number of expressive features.
             z_dim (int): Dimension of the latent vector.
-            supervised_dim (int): Number of dimensions of z_dim for supervised conditioning.
             embed_dim (int): Embedding dimension.
             encoder_depth (int): Number of layers in the axial transformer.
             encoder_heads (int): Number of attention heads.
             decoder_depth (int): Number of layers in the decoder.
             decoder_heads (int): Number of attention heads.
             num_buttons (int): Number of buttons.
-            num_bins_velocity (int): Number of bins for velocity. (0 for no quantization)
-            num_bins_offset (int): Number of bins for offset. (0 for no quantization)
-            monotonic_alignment (str): 'hard' or 'soft'
-            button_type (str): 'Causal' or 'Non-Causal'
+            is_causal (bool): Whether to use causal attention.
+            chunk_size (int): Chunk size for pooling.
+            p (float): Probability of using z_post instead of z_prior.
+            button_penalty (int): Penalty for button hits. 1 : L1, 2 : Group (L1 over T of L2(D))
+            button_dropout (float): Dropout probability for button hits.
         """
         super().__init__()
         
@@ -55,16 +57,16 @@ class GrooveIQ(nn.Module):
         self.E = E
         self.M = M
         self.z_dim = z_dim
-        self.supervised_dim  = supervised_dim
         self.embed_dim = embed_dim
         self.encoder_depth = encoder_depth
         self.encoder_heads = encoder_heads
         self.decoder_depth = decoder_depth
         self.num_buttons   = num_buttons
-        self.is_velocity_quantized = num_bins_velocity > 0
-        self.is_offset_quantized   = num_bins_offset > 0
-        self.monotonic_alignment = monotonic_alignment
-        self.button_type = button_type
+        self.is_causal = is_causal
+        self.chunk_size = chunk_size
+        self.p = p
+        self.button_penalty = button_penalty
+        self.threshold = 0.5
 
         self.sos_token = nn.Parameter(torch.randn(1, E, M))
         self.pos_emb   = PositionalEncoding(embed_dim, T)
@@ -73,16 +75,25 @@ class GrooveIQ(nn.Module):
                                 depth=encoder_depth, heads=encoder_heads, 
                                 dim_heads=None, reversible=False
                         )
+        self.encoder_proj = nn.Linear(E * embed_dim, embed_dim)
+        self.button_hit_repr  = nn.Linear(embed_dim, num_buttons) # (B, T, D) -> (B, T, num_buttons)
+        self.button_dropout   = nn.Dropout(p=button_dropout)
         
-        self.z_mu_proj         = nn.Linear(embed_dim, z_dim)
-        self.z_logvar_proj     = nn.Linear(embed_dim, z_dim)
-        self.attn_proj_instr   = nn.Linear(embed_dim, 1)
-        self.time_attn_proj    = nn.Linear(embed_dim, 1)
-        self.button_projection = nn.Linear(embed_dim, num_buttons * M) # (B, T, D) -> (B, T, num_buttons * M)
-        self.align_proj        = nn.Linear(num_buttons * M, embed_dim) # (B, T, num_buttons * M) -> (B, T, D)
+        self.button_embed = nn.LSTM(num_buttons, embed_dim, batch_first=True)
+        self.button_norm = nn.LayerNorm(embed_dim)
+        
+        # Posterior network q(z | x, button)
+        self.z_mu_proj     = nn.Linear(2 * embed_dim, z_dim)
+        self.z_logvar_proj = nn.Linear(2 * embed_dim, z_dim)
 
-        self.dec_inp_proj      = nn.Linear(E * M, embed_dim) # (B, T', E*M) -> (B, T', D)
-        self.dec_button_proj   = nn.Linear(z_dim + num_buttons * M, embed_dim) # (B, T', z_dim + num_buttons*M) -> (B, T', D)
+        # Prior p(z|button) via RNN
+        self.latent_prior    = nn.LSTM(embed_dim, z_dim, batch_first=True)
+        self.z_prior_mu      = nn.Linear(z_dim, z_dim)
+        self.z_prior_logvar  = nn.Linear(z_dim, z_dim)
+
+        self.dec_inp_proj = nn.Linear(E * M, embed_dim) # (B, T', E*M) -> (B, T', D)
+        self.dec_z_proj   = nn.Linear(z_dim, embed_dim) # (B, T', z_dim) -> (B, T', D)
+        self.dec_btn_proj = nn.Linear(embed_dim, embed_dim) # (B, T', D) -> (B, T', D)
         
         self.decoder = nn.TransformerDecoder(
             decoder_layer = TransformerDecoderLayer(d_model=embed_dim, nhead=decoder_heads, batch_first=True, norm_first=True),
@@ -92,178 +103,135 @@ class GrooveIQ(nn.Module):
         
         self.output_projection = nn.Linear(embed_dim, E * M) # (B, T', D) -> (B, T', E*M)
 
-        # Learned bin quantizers
-        self.velocity_quantizer = LearnableBinsQuantizer(num_bins_velocity, min_val=0.0, max_val=1.0)
-        self.offset_quantizer   = LearnableBinsQuantizer(num_bins_offset, min_val=-0.5, max_val=0.5)
-
-    def aggregate_instrument(self, encoded):
-        # (B, T, E, D) -> (B, T, D)
-        attn_scores = self.attn_proj_instr(encoded).squeeze(-1) # (B, T, E)
-        attn_weights = F.softmax(attn_scores, dim=-1)           # (B, T, E)
-        latent = torch.sum(encoded * attn_weights.unsqueeze(-1), dim=2)  # (B, T, D)
-        return latent
-    
-    def aggregate_time(self, encoded):
-        # (B, T, D) -> (B, D)
-        attn_weights = F.softmax(self.time_attn_proj(encoded), dim=1)
-        latent = torch.sum(encoded * attn_weights, dim=1)
-        return latent
+    def chunk_and_expand(self, tensor):
+        """
+        Args:
+            tensor: Tensor of shape (B, T, D)
+            chunk_size: int
+        Returns:
+            expanded: Tensor of shape (B, T_ * chunk_size, D)
+        """
+        B, T, D = tensor.shape
+        T_ = T // self.chunk_size
+        pooled = tensor[:, :T_ * self.chunk_size].view(B, T_, self.chunk_size, D).mean(dim=2) # (B, T_, D)
+        expanded = pooled.unsqueeze(2).repeat(1, 1, self.chunk_size, 1).view(B, T_ * self.chunk_size, D) # (B, T_ * chunk_size, D)
+        return expanded
 
     def encode(self, x):
         """
         Args:
             x: Tensor of shape (B, T, E, M)
         Returns:
-            button_latent: Tensor of shape (B, T, num_buttons, M)
-            z: Tensor of shape (B, z_dim)
-            mu: Tensor of shape (B, z_dim)
-            kl_loss: scalar
+            encoded: Tensor of shape (B, T, D)
+            button_repr: Tensor of shape (B, T, num_buttons)
         """
         B, T, E, M = x.shape
-        encoded = self.encoder(x)                   # (B, T, E, D)
-        latent = self.aggregate_instrument(encoded) # (B, T, D)
-        
-        # Button latent
-        button_latent = self.button_projection(latent).view(B, T, self.num_buttons, M)
-
-        # z
-        latent_time = self.aggregate_time(latent)
-        mu = self.z_mu_proj(latent_time)          # (B, z_dim)
-        logvar = self.z_logvar_proj(latent_time)  # (B, z_dim)
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        z = mu + eps * std  # Reparameterization  # (B, z_dim)
-        kl_loss = - 0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) # Scalar
-        
-        return button_latent, z, mu, kl_loss
+        encoded = self.encoder(x)                    # (B, T, E, D)
+        encoded = self.encoder_proj(encoded.reshape(B, T, -1)) # (B, T, D)
+        button_repr = self.button_hit_repr(encoded) # (B, T, num_buttons)
+        return encoded, button_repr
+    
+    def calculate_button_penalty(self, button_repr):
+        """
+        Args:
+            button_repr: Tensor of shape (B, T, num_buttons)
+        Returns:
+            button_penalty: Tensor of shape (B, T)
+        """
+        if self.button_penalty == 1: # L1
+            return button_repr.abs().sum(dim=2).mean()
+        elif self.button_penalty == 2: # Group (L1 over T of L2(D))
+            return torch.norm(button_repr, dim=2).mean()
+        else:
+            raise ValueError(f"Invalid button penalty: {self.button_penalty}")
     
     def straight_through_binarize(self, x, threshold=0.5):
         """Applies hard threshold during forward, identity gradient during backward."""
         hard = (x > threshold).float()
         return x + (hard - x).detach()
     
-    def make_button_hvo(self, button_latent, button_hvo_target=None):
+    def make_button_hits(self, button_repr):
         """
         Args:
-            latent: Tensor of shape (B, T, num_buttons, M)
-            button_hvo_target: Tensor of shape (B, T, num_buttons, M) A heuristic target for the button HVO.
+            button_repr: Tensor of shape (B, T, num_buttons)
         Returns:
-            button_hvo: (B, T, num_buttons, M) — [hit, velocity, offset]
+            button_hits: Tensor of shape (B, T, num_buttons)
         """
-        # Get hits and velocity from latent
-        hits_latent     = button_latent[:, :, :, 0]   # (B, T, num_buttons)
-        velocity_latent = button_latent[:, :, :, 1]   # (B, T, num_buttons)
-        offset_latent   = button_latent[:, :, :, 2]   # (B, T, num_buttons)
-        hits_latent     = torch.sigmoid(hits_latent)
-        velocity_latent = (torch.tanh(velocity_latent) + 1.0) / 2.0 # [-1.0, 1.0] -> [0, 1]
-        offset_latent   = torch.tanh(offset_latent) * 0.5           # [-1.0, 1.0] -> [-0.5, 0.5]
-
-        heuristic_loss = torch.tensor(0.0, device=button_latent.device)
-        if button_hvo_target is not None:
-            if self.monotonic_alignment == 'hard':
-                heuristic_loss = self.hard_monotonic_alignment(button_hvo_target, torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1))
-            elif self.monotonic_alignment == 'soft':
-                heuristic_loss = self.soft_monotonic_alignment(button_hvo_target, torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1))
-
-        # Quantize
-        hits_latent     = self.straight_through_binarize(hits_latent)
-        velocity_latent = velocity_latent if not self.is_velocity_quantized else self.velocity_quantizer(velocity_latent)
-        offset_latent   = offset_latent if not self.is_offset_quantized else self.offset_quantizer(offset_latent)
-        button_hvo      = torch.stack([hits_latent, velocity_latent, offset_latent], dim=-1) # (B, T, num_buttons, M)
-        return button_hvo, heuristic_loss
+        button_hits = torch.sigmoid(button_repr)
+        return self.straight_through_binarize(button_hits)
     
-    def supervised_regularizer(self, mu, labels):
+    def make_button_embed(self, button_hits):
         """
         Args:
-            mu: mean tensor of shape (B, z_dim)
-            labels: label tensor of shape (B, supervised_dims)
-            gamma_sup: scalar weight for the loss
+            button_hits: Tensor of shape (B, T, num_buttons)
         Returns:
-            sup_loss: scalar
+            button_embed: Tensor of shape (B, T, D)
         """
-        mu_supervised = torch.sigmoid(mu[:, :self.supervised_dim])
-        sup_loss = F.mse_loss(mu_supervised, labels, reduction='mean')
-        return sup_loss
-    
-    def hard_monotonic_alignment(self, button_hvo_target, button_hvo_pred):
+        button_embed, _ = self.button_embed(button_hits) # (B, T, D)
+        button_embed = self.button_norm(button_embed)    # (B, T, D)
+        return button_embed
+
+    def make_z_post(self, button_embed, encoded):
         """
         Args:
-            button_hvo_target: Tensor of shape (B, T, num_buttons, M)
-            button_hvo_pred: Tensor of shape (B, T, num_buttons, M)
+            button_embed: Tensor of shape (B, T, D)
         Returns:
-            loss: scalar
+            z_post: Tensor of shape (B, T, z_dim)
+            mu: Tensor of shape (B, T, z_dim)
+            logvar: Tensor of shape (B, T, z_dim)
         """
-        weight = torch.tensor(15.0, device=button_hvo_pred.device)
-        hit_mask = (button_hvo_target[:, :, :, 0] == 1).float() # (B, T, num_buttons)
-        hit_mask = hit_mask * weight
-        hit_loss = F.binary_cross_entropy_with_logits(
-            button_hvo_pred[:, :, :, 0], 
-            button_hvo_target[:, :, :, 0], 
-            reduction='mean',
-            pos_weight=weight
-        )
-        velocity_loss = (F.mse_loss(
-            button_hvo_pred[:, :, :, 1], 
-            button_hvo_target[:, :, :, 1], 
-            reduction='none'
-        ) * hit_mask).mean()
-        offset_loss = (F.mse_loss(
-            button_hvo_pred[:, :, :, 2], 
-            button_hvo_target[:, :, :, 2], 
-            reduction='none'
-        ) * hit_mask).mean()
-        return hit_loss + velocity_loss + offset_loss
-    
-    def soft_monotonic_alignment(self, button_hvo_target, button_hvo_pred, temperature=1.0):
-        """
-        Args:
-            button_hvo_target: Tensor (B, T, num_buttons, M)
-            button_hvo_pred:   Tensor (B, T, num_buttons, M)
-        Returns:
-            loss: scalar
-        """
-        B, T, num_buttons, M = button_hvo_target.shape
-        D = self.align_proj.out_features
-        hit_mask = (button_hvo_target[:, :, :, 0] == 1).float()   # (B, T, num_buttons)
-
-        # Project to shared alignment space
-        target_proj = self.align_proj(button_hvo_target.view(B, T, num_buttons * M))  # (B, T, D)
-        pred_proj   = self.align_proj(button_hvo_pred.view(B, T, num_buttons * M))    # (B, T, D)
-
-        # Compute attention energies: pred aligns to target (monotonic)
-        energy = torch.einsum('btd,bsd->bts', pred_proj, target_proj)  # (B, T, T)
-
-        # Mask future time steps
-        monotonic_mask = torch.tril(torch.ones(T, T, device=energy.device))  # (T, T)
-        energy = energy.masked_fill(monotonic_mask == 0, float('-inf'))
-
-        # Compute soft monotonic alignment
-        alignment_probs = torch.softmax(energy / temperature, dim=-1)  # (B, T, T)
-
-        # Expected target under alignment
-        aligned_target = torch.matmul(alignment_probs, target_proj)  # (B, T, D)
-
-        # === Elementwise MSE ===
-        per_token_loss = F.mse_loss(pred_proj, aligned_target, reduction='none')  # (B, T, D)
-
-        # === Mask loss by hit_mask ===
-        # Average across D, then multiply mask (broadcasted) and compute mean
-        loss_mask = hit_mask.any(dim=2).float()  # (B, T), mark timesteps with any active button
-        masked_loss = per_token_loss.mean(dim=-1) * loss_mask  # (B, T)
+        enc_pooled = self.chunk_and_expand(encoded)      # (B, T_, D)
+        btn_pooled = self.chunk_and_expand(button_embed) # (B, T_, D)
         
-        if loss_mask.sum() == 0:
-            return torch.tensor(0.0, device=button_hvo_target.device, requires_grad=True)
+        # Posterior Network q(z | x, button_hits)
+        enc_mask_cat = torch.cat([enc_pooled, btn_pooled], dim=-1)        # (B, T, 2 * D)
+        mu = self.z_mu_proj(enc_mask_cat)                                 # (B, T, z_dim)
+        logvar = self.z_logvar_proj(enc_mask_cat).clamp(min=-10, max=10)  # (B, T, z_dim)
+        std = torch.exp(0.5 * logvar)                                     # (B, T, z_dim)
+        eps = torch.randn_like(std)                                       # (B, T, z_dim)
+        z_post = mu + eps * std                                           # (B, T, z_dim)
+        return z_post, mu, logvar 
 
-        loss = masked_loss.sum() / loss_mask.sum()  # scalar
-        return loss
+    def make_z_prior(self, button_embed):
+        """
+        Args:
+            button_embed: Tensor of shape (B, T, D)
+        Returns:
+            z_prior: Tensor of shape (B, T, z_dim)
+            mu_prior: Tensor of shape (B, T, z_dim)
+            logvar_prior: Tensor of shape (B, T, z_dim)
+        """
+        # Prior Network p(z_t | button_hits)
+        prior_embed, _ = self.latent_prior(button_embed) # (B, T, z_dim)
+        prior_embed = self.chunk_and_expand(prior_embed) # (B, T, z_dim)
+        mu = self.z_prior_mu(prior_embed)                                # (B, T, z_dim)
+        logvar = self.z_prior_logvar(prior_embed).clamp(min=-10, max=10) # (B, T, z_dim)
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z_prior = mu + eps * std
+        return z_prior, mu, logvar
+    
+    def calculate_kl_loss(self, z_post, z_prior, mu_post, mu_prior, logvar_post, logvar_prior):
+        """
+        Args:
+            z_post: Tensor of shape (B, T, z_dim)
+            z_prior: Tensor of shape (B, T, z_dim)
+        """
+        B, T, _ = z_post.shape
+        var_post = torch.exp(logvar_post)
+        var_prior = torch.exp(logvar_prior)
 
+        kl = 0.5 * torch.sum(
+            logvar_prior - logvar_post + (var_post + (mu_post - mu_prior)**2) / (var_prior + 1e-6) - 1
+        ) / (B * T)
+        return kl
 
-    def decode(self, input, button_hvo, z):
+    def decode(self, input, z, button_embed):
         """
         Args:
             input: Tensor of shape  (B, T, E, M)
-            button_hvo: Tensor of shape (B, T, num_buttons, M)
-            z: Tensor of shape (B, z_dim)
+            z: Tensor of shape (B, T, z_dim)
+            button_embed: Tensor of shape (B, T, D)
         Returns:
             h: Tensor of shape (B, T, E)
             v: Tensor of shape (B, T, E)
@@ -278,15 +246,10 @@ class GrooveIQ(nn.Module):
         target = self.pos_emb(target) # (B, T', D)
         target_causal_mask = CausalMask(target) # (T', T')
         
-        button_hit_mask = (~(button_hvo[:, :, :, 0].sum(dim=-1) == 0)).float().unsqueeze(-1)     # (B, T, 1)
-        combined_latent = torch.cat(
-            [
-                z.unsqueeze(1).expand(-1, T, -1), 
-                button_hvo.view(B, T, num_buttons * M) * button_hit_mask
-            ], dim=2) # (B, T, z_dim + num_buttons * M)
-        memory = self.dec_button_proj(combined_latent)  # (B, T', D)
-        memory = self.pos_emb(memory) # (B, T', D)
-        memory_causal_mask = CausalMask(memory) if self.button_type == 'Causal' else None # (T', T')
+        # Memory
+        memory = self.dec_z_proj(z) + self.dec_btn_proj(button_embed)  # (B, T', D)
+        memory = self.pos_emb(memory)     # (B, T', D)
+        memory_causal_mask = CausalMask(memory) if self.is_causal else None # (T', T')
 
         decoder_out = self.decoder(
             tgt = target, 
@@ -294,7 +257,7 @@ class GrooveIQ(nn.Module):
             tgt_mask = target_causal_mask,
             memory_mask = memory_causal_mask,
             tgt_is_causal = True,
-            memory_is_causal = self.button_type == 'Causal'
+            memory_is_causal = self.is_causal
         ) # (B, T', D)
 
         output = self.output_projection(decoder_out) # (B, T', E*M)
@@ -309,121 +272,110 @@ class GrooveIQ(nn.Module):
         }
         return h_logits, v, o, attn_weights
     
-    def sample_z(self, batch_size, device):
+    def sample_z_from_button_embed(self, button_embed):
         """
-        Sample z from standard normal prior
+        Args:
+            button_embed: Tensor of shape (B, T, D)
+        Returns:
+            z: Tensor of shape (B, T, z_dim)
         """
-        return torch.randn(batch_size, self.z_dim, device=device)
-    
+        z_prior, mu_prior, logvar_prior = self.make_z_prior(button_embed)
+        return z_prior
 
-    def forward(self, x, labels=None, button_hvo_target=None):
+    def forward(self, x, button_hits=None):
         """
         Args:
             x: Tensor of shape (B, T, E, M)
-            labels: Tensor of shape (B, supervised_dim)
-            button_hvo_target: Tensor of shape (B, T, num_buttons, M) A heuristic target for the button HVO.
+            button_hits: Tensor of shape (B, T, num_buttons) (optional)
         Returns:
             h_logits: Tensor of shape (B, T, E)
             v: Tensor of shape (B, T, E)
             o: Tensor of shape (B, T, E)
-            button_latent: Tensor of shape (B, T, num_button, M)
-            button_hvo: Tensor of shape (B, T, num_buttons, M)
             attn_weights: Dictionary of attention weights
-            vo_penalty: Tensor of shape (B)
             kl_loss: Tensor of shape (B)
-            sup_loss: Tensor of shape (B)
         """
-        # ========== ENCODING ==========
-        button_latent, z, mu, kl_loss = self.encode(x) # (B, T, num_buttons, M), (B, z_dim), (B, z_dim), (B)
-
-        # ========== MAKE BUTTON HVO ==========
-        button_hvo, heuristic_loss = self.make_button_hvo(button_latent, button_hvo_target) # (B, T, num_buttons, M)
-
-        # ========== DECODING ==========
-        h_logits, v, o, attn_weights = self.decode(x, button_hvo, z) # (B, T, E), (B, T, E), (B, T, E)
-
-        button_hits     = button_hvo[:, :, :, 0] # (B, T, num_buttons)
-        button_velocity = button_hvo[:, :, :, 1] # (B, T, num_buttons)
-        button_offset   = button_hvo[:, :, :, 2] # (B, T, num_buttons)
+        # Encode
+        encoded, button_repr = self.encode(x) # (B, T, D), (B, T, num_buttons)
+        button_penalty = self.calculate_button_penalty(button_repr)
         
-        # Penalize offset/velocity values in non-hit frames (maybe not needed, since we mask out non-hit frames in decoder)
-        no_hit_mask = (button_hits == 0).float().unsqueeze(-1) # (B, T, num_buttons, 1)
-        vo_penalty  = torch.stack([
-            button_velocity, 
-            button_offset
-        ], dim=-1) * no_hit_mask # (B, T, num_buttons, 2)
-        vo_penalty = vo_penalty.abs().mean()
+        # Button processing
+        if button_hits is None:
+            button_hits = self.make_button_hits(button_repr) # (B, T, num_buttons)
 
-        sup_loss = torch.tensor(0.0, device=x.device)
-        if labels is not None:
-            sup_loss = self.supervised_regularizer(mu, labels)
+        button_embed = self.make_button_embed(button_hits) # (B, T, D)
+        button_embed = self.button_dropout(button_embed) # (B, T, D)
+        
+        # Posterior network
+        z_post, mu_post, logvar_post = self.make_z_post(button_embed, encoded) # (B, T, z_dim), (B, T, z_dim), (B, T, z_dim)
 
+        # Prior network
+        z_prior, mu_prior, logvar_prior = self.make_z_prior(button_embed) # (B, T, z_dim), (B, T, z_dim), (B, T, z_dim)
+
+        # Calculate KL loss/Distill loss
+        kl_loss = self.calculate_kl_loss(z_post, z_prior, mu_post, mu_prior, logvar_post, logvar_prior)
+        distill_loss = F.mse_loss(mu_prior, mu_post) + F.mse_loss(logvar_prior, logvar_post)
+
+
+        # Scheduled sampling from prior network: 1 → use z_post, 0 → use z_prior
+        mask = torch.bernoulli(torch.full((x.shape[0], 1, 1), self.p, device=x.device))
+        z = mask * z_post + (1 - mask) * z_prior 
+        
+        # Decode
+        h_logits, v, o, attn_weights = self.decode(x, z, button_embed) # (B, T, E), (B, T, E), (B, T, E)
+
+        # Button HVO (for visualization)
+        button_hvo = torch.cat([button_hits.unsqueeze(-1),  torch.zeros_like(button_hits).unsqueeze(-1).repeat(1, 1, 1, self.M - 1)], dim=-1) # (B, T, num_buttons, M)
+        
         return {
                 'h_logits': h_logits, 
                 'v': v, 
-                'o': o, 
-                'button_latent': button_latent, 
-                'button_hvo': button_hvo, 
+                'o': o,
+                'button_hvo': button_hvo,
                 'attn_weights': attn_weights, 
-                'vo_penalty': vo_penalty, 
-                'heuristic_loss': heuristic_loss,
                 'kl_loss': kl_loss, 
-                'sup_loss': sup_loss
+                'distill_loss': distill_loss,
+                'button_penalty': button_penalty,
             }
     
-    def generate(self, button_hvo, z=None, max_steps=None, threshold=0.5):
+    def generate(self, button_embed, z=None, max_steps=None, threshold=None):
         """
         Generate a prediction for the input at time t, given input < t, button HVO <= t, and latent vector z.
         Args:
-            button_hvo: Tensor of shape (B, T, num_buttons, M)
-            z: Tensor of shape (B, z_dim)
+            z: Tensor of shape (B, T, z_dim)
+            button_embed: Tensor of shape (B, T, D)
             max_steps: int (optional)
         Returns:
             hvo_pred: Tensor of shape (B, T, E, 3)
             hit_logits: Tensor of shape (B, T, E) for threshold calculation
         """
-        if z is None:
-            z = self.sample_z(button_hvo.shape[0], button_hvo.device)
-        
-        B, T, num_buttons, M = button_hvo.shape
+        B, T, _ = button_embed.shape
         E = self.E
-        T_gen = max_steps or T
+        T_gen = int(max_steps or T)
+
+        if threshold is None:
+            threshold = self.threshold
 
         generated = self.sos_token.unsqueeze(0).repeat(B, 1, 1, 1) # (B, 1, E, M)
         hit_probs = []
-        button_hit_mask = (~(button_hvo[:, :, :, 0].sum(dim=-1) == 0)).float().unsqueeze(-1) # (B, T, 1)
-        
-        cached_latent = None
-        if self.button_type == 'Non-Causal':
-            cached_latent = torch.cat(
-                [
-                    z.unsqueeze(1).expand(-1, T, -1), 
-                    button_hvo.view(B, T, num_buttons * M) * button_hit_mask
-                ], dim=2
-            ) # (B, T, z_dim + num_buttons * M)
+        if z is None:
+            z = self.sample_z_from_button_embed(button_embed)
         
         for t in range(T_gen):
 
             # Target
-            tgt_embed = self.dec_inp_proj(generated.view(B, t + 1, E * M)) # (B, T, D)
+            tgt_embed = self.dec_inp_proj(generated.view(B, t + 1, E * self.M)) # (B, T, D)
             tgt_embed_pos = self.pos_emb(tgt_embed)
             
             # Memory
-            if cached_latent is None:
-                combined_latent = torch.cat(
-                    [
-                        z.unsqueeze(1).expand(-1, t + 1, -1), 
-                        button_hvo[:, :t + 1].view(B, t + 1, num_buttons * M) * button_hit_mask[:, :t + 1, :]
-                    ], dim=2
-                ) # (B, T, z_dim + num_buttons * M)
+            if self.is_causal:
+                mem_embed = self.dec_z_proj(z[:, :t + 1]) + self.dec_btn_proj(button_embed[:, :t + 1]) # (B, T, D)
             else:
-                combined_latent = cached_latent # (B, T, z_dim + num_buttons * M)
-            mem_embed = self.dec_button_proj(combined_latent) # (B, T, D)
+                mem_embed = self.dec_z_proj(z) + self.dec_btn_proj(button_embed) # (B, T, D)
             mem_embed_pos = self.pos_emb(mem_embed)
             
             # Mask
             tgt_mask = CausalMask(tgt_embed_pos)
-            mem_mask = CausalMask(mem_embed_pos) if self.button_type == 'Causal' else None
+            mem_mask = CausalMask(mem_embed_pos) if self.is_causal else None
            
             dec_out = self.decoder(
                 tgt = tgt_embed_pos, 
@@ -431,12 +383,12 @@ class GrooveIQ(nn.Module):
                 tgt_mask = tgt_mask, 
                 memory_mask = mem_mask, 
                 tgt_is_causal = True,   
-                memory_is_causal = self.button_type == 'Causal'
+                memory_is_causal = self.is_causal
             ) # (B, t + 1, D)
 
             # Output
             output = self.output_projection(dec_out) # (B, t + 1, E * M)
-            output = output.view(B, t + 1, E, M)     # (B, t + 1, E, M)
+            output = output.view(B, t + 1, E, -1)     # (B, t + 1, E, M)
 
             # Predict
             pred_step = output[:, -1, :, :]          # (B, E, M)
@@ -454,15 +406,17 @@ class GrooveIQ(nn.Module):
         return generated, torch.stack(hit_probs, dim=1) # (B, T, E)
 
 if __name__ == "__main__":
-    input_size = (4, 33, 9, 3)
-    encoder = GrooveIQ(
-        T=33, E=9, M=3, z_dim=64, supervised_dim=4,
-        embed_dim=128, encoder_depth=4, encoder_heads=4, 
-        decoder_depth=1, decoder_heads=2, 
-        num_buttons=3, num_bins_velocity=8, num_bins_offset=16,
-        monotonic_alignment='hard'
+    input_size = [(4, 33, 9, 3)]
+    model = GrooveIQ(
+        T=33, E=9, M=3, 
+        z_dim=128, embed_dim=128, 
+        encoder_depth=2, encoder_heads=4, 
+        decoder_depth=2, decoder_heads=2, 
+        num_buttons=2, is_causal=True
     )
-    summary(encoder, input_size=input_size)
+    summary(model, input_size=input_size)
+    
+
 
 
         
