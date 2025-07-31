@@ -1,2 +1,4 @@
 from .GrooveIQ import GrooveIQ
-__all__ = ["GrooveIQ"]
+from .VQGrooveIQ import VQGrooveIQ
+
+__all__ = ["GrooveIQ", "VQGrooveIQ"]

@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, Tuple
 from torchinfo import summary
 from utils import create_optimizer, create_scheduler
 from data import SampleData
-from models import GrooveIQ
+from models import GrooveIQ, VQGrooveIQ
 
 
 class BaseTrainer(ABC):
@@ -135,7 +135,7 @@ class BaseTrainer(ABC):
 
         # Save model architecture with torchinfo summary
         with open(expt_root / "model_arch.txt", "w") as f:
-            if isinstance(self.model, GrooveIQ):
+            if isinstance(self.model, GrooveIQ) or isinstance(self.model, VQGrooveIQ):
                 # Get a sample input shape from your model's expected input
                 batch_size = 8
                 input_size = (batch_size, self.model.T, self.model.E, self.model.M)
