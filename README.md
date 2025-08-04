@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository contains the codebase for my master's thesis. While drumming with nuance takes years to master, most people already have an intuitive sense of rhythm. **GrooveIQ** bridges that gap—it's a deep learning system for interactive drum pattern generation that transforms simple, time-aligned button presses into expressive drum performances. At its core is a novel Variational Autoencoder (VAE) that learns to map between high-dimensional drum sequences and low-dimensional control signals, enabling intuitive, real-time groove creation through sparse rhythmic input.
+This repository contains the codebase for my [master's thesis](https://drive.google.com/file/d/1mgFCqtonuKOyAGlowmn22R8wEZE1khk1/view?usp=sharing). While drumming with nuance takes years to master, most people already have an intuitive sense of rhythm. **GrooveIQ** bridges that gap—it's a deep learning system for interactive drum pattern generation that transforms simple, time-aligned button presses into expressive drum performances. At its core is a novel Variational Autoencoder (VAE) that learns to map between high-dimensional drum sequences and low-dimensional control signals, enabling intuitive, real-time groove creation through sparse rhythmic input.
 
 ## 🚀 Quick Start
 
