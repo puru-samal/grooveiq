@@ -3,5 +3,6 @@ from .create_lr_scheduler import create_scheduler, plot_lr_schedule
 from .constraint_losses import ConstraintLosses
 from .metrics import DrumMetrics, RunningAverageMeter
 from .weight_scheduler import WeightScheduler
+from .analysis import *
 
 __all__ = ["create_optimizer", "create_scheduler", "plot_lr_schedule", "ConstraintLosses", "DrumMetrics", "RunningAverageMeter", "WeightScheduler"]

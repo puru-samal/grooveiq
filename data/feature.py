@@ -905,6 +905,8 @@ class DrumMIDIFeature:
         Plot the fixed grid.
         """
         grid, _ = self.to_fixed_grid(steps_per_quarter)
+        reorder_idx = [0, 2, 5, 6, 1, 3, 4, 7, 8]
+        grid = grid[:, reorder_idx, :]
         drum_names = [self.canonical_map[k] for k in self.canonical_map.keys()]
         return DrumMIDIFeature._grid_plot(grid, ax, drum_names, "Fixed Grid", "Time Step", "Drum Class")
 
@@ -928,25 +930,39 @@ class DrumMIDIFeature:
             if s in slot_to_class_slot:
                 pitch, idx = slot_to_class_slot[s]
                 name = self.canonical_map[pitch]
-                slot_labels.append(f"{name} ({idx})")
+                if idx == 0:
+                    slot_labels.append(f"{name}")
+                else:
+                    slot_labels.append(f"")
             else:
                 slot_labels.append(f"Unknown ({s})")
         
         return DrumMIDIFeature._grid_plot(grid, ax, slot_labels, "Flexible Grid", "Time Step", "Drum Class")
 
     @staticmethod
-    def _grid_plot(grid: torch.Tensor, ax: Optional[plt.Axes] = None, class_names: Optional[List[str]] = None, title: str = "Grid", xlabel: str = "Time Step", ylabel: str = "Drum Class"):
+    def _grid_plot(
+        grid: torch.Tensor,
+        ax: Optional[plt.Axes] = None,
+        class_names: Optional[List[str]] = None,
+        title: str = "Grid",
+        xlabel: str = "Time Step",
+        ylabel: str = "Drum Class",
+        title_fontsize: int = 24,
+        label_fontsize: int = 22,
+        tick_fontsize: int = 16,
+        legend_fontsize: int = 22,
+        legend_title_fontsize: int = 20,
+        show_legend: bool = False,
+        external_legend: bool = True,
+    ):
         """
-        Unified fixed grid visualization:
-        - Velocity shown as color
-        - Offset shown as marker
-        - Special marker if hit == 0 but velocity/offset nonzero
+        Unified fixed grid visualization with customizable text and legend controls.
         """
         import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches
         from matplotlib.colors import to_rgb
 
-        modern_colors = ['#45B7D1', '#FF6B6B']  # low → high velocity
+        modern_colors = ['#45B7D1', '#FF6B6B']
         c0 = to_rgb(modern_colors[0])
         c1 = to_rgb(modern_colors[1])
 
@@ -967,14 +983,15 @@ class DrumMIDIFeature:
         else:
             fig = ax.get_figure()
 
-        ax.set_title(title, fontsize=14, fontweight='bold')
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
+        ax.set_title(title, fontsize=title_fontsize, fontweight='bold')
+        ax.set_xlabel(xlabel, fontsize=label_fontsize)
+        ax.set_ylabel(ylabel, fontsize=label_fontsize)
 
         ax.set_xlim(0, T)
         ax.set_ylim(-0.5, E - 0.5)
         ax.set_yticks(range(E))
-        ax.set_yticklabels(class_names)
+        ax.set_yticklabels(class_names, fontsize=tick_fontsize)
+        ax.tick_params(axis='x', labelsize=tick_fontsize)
         ax.grid(True, axis='x', linestyle=':', alpha=0.3)
 
         for e in range(E):
@@ -982,44 +999,45 @@ class DrumMIDIFeature:
                 hit = hits[e, t]
                 velocity = velocities[e, t]
                 offset = offsets[e, t]
-                
-                '''
-                # Check for ghost articulation: no hit, but velocity or offset nonzero
-                is_ghost = (hit == 0) and ((velocity > 0.01) or (abs(offset) > 0.01))
-
-                if is_ghost:
-                    # Plot ghost marker: red X
-                    ax.scatter(t, e, s=100, c='red', marker='X', edgecolors='k', linewidths=0.5)
-                    continue
-                '''
 
                 if hit == 0:
                     continue
 
                 color = interpolate_color(velocity)
-
-                # Offset as marker shape
-                if offset < -0.05:
-                    marker = '<'
-                elif offset > 0.05:
-                    marker = '>'
-                else:
-                    marker = 's'
+                marker = '<' if offset < -0.05 else '>' if offset > 0.05 else 's'
 
                 ax.scatter(t, e, s=100, c=[color], marker=marker, edgecolors='k', linewidths=0.5)
 
-        # Legend
-        legend = [
-            mpatches.Patch(facecolor=modern_colors[0], label='Low Velocity'),
-            mpatches.Patch(facecolor=modern_colors[1], label='High Velocity'),
-            plt.Line2D([0], [0], marker='<', color='w', label='Early', markerfacecolor='gray', markeredgecolor='k', markersize=8),
-            plt.Line2D([0], [0], marker='>', color='w', label='Late', markerfacecolor='gray', markeredgecolor='k', markersize=8),
-            plt.Line2D([0], [0], marker='s', color='w', label='On-time', markerfacecolor='gray', markeredgecolor='k', markersize=8),
-            plt.Line2D([0], [0], marker='X', color='w', label='Ghost (hit=0)', markerfacecolor='red', markeredgecolor='k', markersize=8),
-        ]
-        ax.legend(handles=legend, loc='upper right', title="Encoding")
+        if show_legend:
+            legend = [
+                mpatches.Patch(facecolor=modern_colors[0], label='Low Velocity'),
+                mpatches.Patch(facecolor=modern_colors[1], label='High Velocity'),
+                plt.Line2D([0], [0], marker='<', color='w', label='Early', markerfacecolor='gray', markeredgecolor='k', markersize=8),
+                plt.Line2D([0], [0], marker='>', color='w', label='Late', markerfacecolor='gray', markeredgecolor='k', markersize=8),
+                plt.Line2D([0], [0], marker='s', color='w', label='On-time', markerfacecolor='gray', markeredgecolor='k', markersize=8),
+            ]
+            if external_legend:
+                fig.subplots_adjust(right=0.75)
+                ax.legend(
+                    handles=legend,
+                    loc='center left',
+                    bbox_to_anchor=(1.01, 0.5),
+                    fontsize=legend_fontsize,
+                    title="Encoding",
+                    title_fontsize=legend_title_fontsize,
+                )
+            else:
+                ax.legend(
+                    handles=legend,
+                    loc='upper right',
+                    fontsize=legend_fontsize,
+                    title="Encoding",
+                    title_fontsize=legend_title_fontsize,
+                )
 
         return fig, ax
+
+
 
 
 

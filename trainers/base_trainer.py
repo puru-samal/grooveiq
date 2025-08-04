@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, Tuple
 from torchinfo import summary
 from utils import create_optimizer, create_scheduler
 from data import SampleData
-from models import GrooveIQ, VQGrooveIQ
+from models import GrooveIQ
 
 
 class BaseTrainer(ABC):
