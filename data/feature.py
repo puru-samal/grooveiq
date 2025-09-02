@@ -617,7 +617,11 @@ class DrumMIDIFeature:
 
         # Sample simplification parameters
         win_size = random.choices([s for s, _ in win_sizes], weights=[p for _, p in win_sizes])[0]
-        max_velocity = grid[:, :, 1].max().item()
+        try:
+            max_velocity = grid[:, :, 1].max().item()
+        except Exception as e:
+            print(f"[Feature.simplify_to_button_hvo] Error calculating max velocity: {e}, grid shape: {grid.shape}")
+            max_velocity = 100
         velocity_threshold = max_velocity * random.uniform(*velocity_range)
 
         for i in range(0, T, win_size):
