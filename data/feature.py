@@ -361,7 +361,7 @@ class DrumMIDIFeature:
             - stats: dict with note loss statistics:  
         """
         time_signature = (self.score.time_signatures[0].numerator, self.score.time_signatures[0].denominator)
-        T = get_num_quarters(self.end, time_signature, self.score.tpq) * steps_per_quarter + 1
+        T = get_num_quarters(self.end, time_signature, self.score.tpq) * steps_per_quarter #+ 1
         note_to_index = {note: i for i, note in enumerate(self.canonical_map.keys())}
         E = len(note_to_index)
         M = 3
@@ -381,6 +381,9 @@ class DrumMIDIFeature:
             t = int(np.round(t_exact))
             offset = t_exact - t
             velocity = note.velocity / 127.0
+
+            if t >= T:
+                continue
 
             # Largest velocity wins
             if grid[t, index, 0] == 1.0:
@@ -733,7 +736,7 @@ class DrumMIDIFeature:
             stats: Dict with note loss statistics
         """
         time_signature = (self.score.time_signatures[0].numerator, self.score.time_signatures[0].denominator)
-        T = get_num_quarters(self.end, time_signature, self.score.tpq) * steps_per_quarter + 1
+        T = get_num_quarters(self.end, time_signature, self.score.tpq) * steps_per_quarter #+ 1
         E = len(self.canonical_map)
         stats = {
             'total_notes': 0,
@@ -750,6 +753,8 @@ class DrumMIDIFeature:
             pitch = note.pitch
             t_exact = (note.time / self.score.tpq) * steps_per_quarter
             t = int(np.round(t_exact))
+            if t >= T:
+                continue
             offset = t_exact - t
             velocity = note.velocity / 127.0
             hits_by_te[(t, pitch)].append((velocity, offset))
@@ -1058,6 +1063,7 @@ if __name__ == "__main__":
     sample = pickle_data[rand_idx]
     feature = DrumMIDIFeature(sample["midi_bytes"])
     fixed_grid, _ = feature.to_fixed_grid(steps_per_quarter=4)
+    print(f"fixed_grid.shape: {fixed_grid.shape}")
     feature_reconstructed = feature.from_fixed_grid(fixed_grid, steps_per_quarter=4)
     feature_reconstructed.play()
 

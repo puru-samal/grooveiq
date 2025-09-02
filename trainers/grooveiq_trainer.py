@@ -349,7 +349,8 @@ class GrooveIQ_Trainer(BaseTrainer):
                 if button_hits is None:
                     button_hits  = self.model.make_button_hits(button_repr)
                 button_embed = self.model.make_button_embed(button_hits)
-                z_post, _, _ = self.model.make_z_post(button_embed, encoded)
+                encoded_chunked = self.model.chunk(encoded) # (B, T // chunk_size, D)
+                z_post, _, _ = self.model.make_z_post(button_embed, encoded_chunked)
                 generated_grids, hit_probs = self.model.generate(button_embed, z_post, max_steps=max_length, threshold=self.threshold)
                 button_hvo = torch.cat([button_hits.unsqueeze(-1),  torch.zeros_like(button_hits).unsqueeze(-1).repeat(1, 1, 1, self.model.M - 1)], dim=-1) # (B, T, num_buttons, M)
                 torch.cuda.empty_cache()

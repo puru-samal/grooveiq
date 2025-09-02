@@ -28,7 +28,7 @@ class GrooveIQ(nn.Module):
             decoder_depth=2, decoder_heads=4, 
             num_buttons=2,
             is_causal: bool = True,
-            chunk_size: int = 3,
+            chunk_size: int = 16,
             p: float = 0.5,
             button_penalty: int = 1,
             button_dropout: float = 0.5,
@@ -103,6 +103,29 @@ class GrooveIQ(nn.Module):
         
         self.output_projection = nn.Linear(embed_dim, E * M) # (B, T', D) -> (B, T', E*M)
 
+    def chunk(self, tensor):
+        """
+        Args:
+            tensor: Tensor of shape (B, T, D)
+        Returns:
+            chunked: Tensor of shape (B, T_, D)
+        """
+        B, T, D = tensor.shape
+        T_ = T // self.chunk_size
+        chunked = tensor[:, :T_ * self.chunk_size].view(B, T_, self.chunk_size, D).mean(dim=2) # (B, T_, D)
+        return chunked
+    
+    def expand(self, tensor):
+        """
+        Args:
+            tensor: Tensor of shape (B, T_, D)
+        Returns:
+            expanded: Tensor of shape (B, T_ * chunk_size, D)
+        """
+        B, T_, D = tensor.shape
+        expanded = tensor.unsqueeze(2).repeat(1, 1, self.chunk_size, 1).view(B, T_ * self.chunk_size, D) # (B, T_ * chunk_size, D)
+        return expanded # (B, T_ * chunk_size, D)
+    
     def chunk_and_expand(self, tensor):
         """
         Args:
@@ -111,11 +134,7 @@ class GrooveIQ(nn.Module):
         Returns:
             expanded: Tensor of shape (B, T_ * chunk_size, D)
         """
-        B, T, D = tensor.shape
-        T_ = T // self.chunk_size
-        pooled = tensor[:, :T_ * self.chunk_size].view(B, T_, self.chunk_size, D).mean(dim=2) # (B, T_, D)
-        expanded = pooled.unsqueeze(2).repeat(1, 1, self.chunk_size, 1).view(B, T_ * self.chunk_size, D) # (B, T_ * chunk_size, D)
-        return expanded
+        return self.expand(self.chunk(tensor))
 
     def encode(self, x):
         """
@@ -171,17 +190,18 @@ class GrooveIQ(nn.Module):
         button_embed = self.button_norm(button_embed)    # (B, T, D)
         return button_embed
 
-    def make_z_post(self, button_embed, encoded):
+    def make_z_post(self, button_embed, encoded_chunked):
         """
         Args:
             button_embed: Tensor of shape (B, T, D)
+            encoded_chunked: Tensor of shape (B, T // chunk_size, D)
         Returns:
             z_post: Tensor of shape (B, T, z_dim)
             mu: Tensor of shape (B, T, z_dim)
             logvar: Tensor of shape (B, T, z_dim)
         """
-        enc_pooled = self.chunk_and_expand(encoded)      # (B, T_, D)
         btn_pooled = self.chunk_and_expand(button_embed) # (B, T_, D)
+        enc_pooled = self.expand(encoded_chunked) # (B, T_, D)
         
         # Posterior Network q(z | x, button_hits)
         enc_mask_cat = torch.cat([enc_pooled, btn_pooled], dim=-1)        # (B, T, 2 * D)
@@ -303,10 +323,11 @@ class GrooveIQ(nn.Module):
             button_hits = self.make_button_hits(button_repr) # (B, T, num_buttons)
 
         button_embed = self.make_button_embed(button_hits) # (B, T, D)
-        button_embed = self.button_dropout(button_embed) # (B, T, D)
+        button_embed = self.button_dropout(button_embed)   # (B, T, D)
         
         # Posterior network
-        z_post, mu_post, logvar_post = self.make_z_post(button_embed, encoded) # (B, T, z_dim), (B, T, z_dim), (B, T, z_dim)
+        encoded_chunked = self.chunk(encoded) # (B, T // chunk_size, D)
+        z_post, mu_post, logvar_post = self.make_z_post(button_embed, encoded_chunked) # (B, T, z_dim), (B, T, z_dim), (B, T, z_dim)
 
         # Prior network
         z_prior, mu_prior, logvar_prior = self.make_z_prior(button_embed) # (B, T, z_dim), (B, T, z_dim), (B, T, z_dim)
@@ -406,13 +427,14 @@ class GrooveIQ(nn.Module):
         return generated, torch.stack(hit_probs, dim=1) # (B, T, E)
 
 if __name__ == "__main__":
-    input_size = [(4, 33, 9, 3)]
+    input_size = [(4, 64, 9, 3)]
     model = GrooveIQ(
-        T=33, E=9, M=3, 
+        T=64, E=9, M=3, 
         z_dim=128, embed_dim=128, 
         encoder_depth=2, encoder_heads=4, 
         decoder_depth=2, decoder_heads=2, 
-        num_buttons=2, is_causal=True
+        num_buttons=2, is_causal=True,
+        chunk_size=16
     )
     summary(model, input_size=input_size)
     
