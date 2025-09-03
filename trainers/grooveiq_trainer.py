@@ -280,7 +280,7 @@ class GrooveIQ_Trainer(BaseTrainer):
             self.current_epoch += 1
             train_metrics, train_plots = self._train_epoch(train_dataloader)
             val_metrics, val_results = self._validate_epoch(val_dataloader, num_batches=10)
-            if epoch % 5 == 0:
+            if epoch % 1 == 0:
                 self.threshold = val_metrics['optimal_threshold']
             self.model.threshold = self.threshold
 
