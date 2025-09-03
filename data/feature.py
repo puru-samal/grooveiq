@@ -699,12 +699,12 @@ class DrumMIDIFeature:
         if grid.dim() == 3:
             grid = grid.unsqueeze(0)
         B, T, E, M = grid.shape
-        assert M == 3
 
         # instrument -> button LUT
         inst2btn = torch.full((E,), -1, device=device, dtype=torch.long)
-        for b, insts in enumerate(button_map):
-            inst2btn[torch.as_tensor(insts, device=device)] = b
+        for btn, insts in button_map.items():  # <-- use items()
+            indices = torch.tensor(insts, device=device, dtype=torch.long)     
+            inst2btn[indices] = btn
 
         # window size (single sample per call)
         sizes = torch.tensor([s for s,_ in win_sizes], device=device)
@@ -714,7 +714,7 @@ class DrumMIDIFeature:
 
         nwin = T // win_size
         if nwin == 0:
-            return torch.zeros((B, T, num_buttons, 3), device=device, dtype=dtype)
+            return torch.zeros((B, T, num_buttons, M), device=device, dtype=dtype)
 
         T_used = nwin * win_size
         g = grid[:, :T_used]                         # (B,T_used,E,3)
@@ -727,7 +727,6 @@ class DrumMIDIFeature:
 
         # reshape into windows
         wV = V.view(B, nwin, win_size, E)
-
         keep_win = (torch.rand((B, nwin), device=device) < win_retain_prob)  # bool mask
         valid = wV > v_thr.view(B, 1, 1, 1)
 
@@ -782,7 +781,7 @@ class DrumMIDIFeature:
         bi_s  = bi[order];  t_s = t_lin[order];  b_s = btn[order]
         Hs    = Hc[order];  Vs  = Vc[order];     Os  = Oc[order]
 
-        out = torch.zeros((B, T, num_buttons, 3), device=device, dtype=dtype)
+        out = torch.zeros((B, T, num_buttons, M), device=device, dtype=dtype)
         out[bi_s, t_s, b_s, 0] = Hs
         out[bi_s, t_s, b_s, 1] = Vs
         out[bi_s, t_s, b_s, 2] = Os
