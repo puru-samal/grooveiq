@@ -67,6 +67,7 @@ class GrooveIQ(nn.Module):
         self.p = p
         self.button_penalty = button_penalty
         self.threshold = 0.5
+        self.temperature = 1.0
 
         self.sos_token = nn.Parameter(torch.randn(1, E, M))
         self.pos_emb   = PositionalEncoding(embed_dim, T)
@@ -358,13 +359,15 @@ class GrooveIQ(nn.Module):
                 'button_penalty': button_penalty,
             }
     
-    def generate(self, button_embed, z=None, max_steps=None, threshold=None):
+    def generate(self, button_embed, z=None, max_steps=None, threshold=None, temperature=None):
         """
         Generate a prediction for the input at time t, given input < t, button HVO <= t, and latent vector z.
         Args:
             z: Tensor of shape (B, T, z_dim)
             button_embed: Tensor of shape (B, T, D)
             max_steps: int (optional)
+            threshold: float or tensor broadcastable to (B, E); compared in probability space
+            temperature: float or tensor broadcastable to (B, E); applied to hit logits as p = sigmoid(logits / T)
         Returns:
             hvo_pred: Tensor of shape (B, T, E, 3)
             hit_logits: Tensor of shape (B, T, E) for threshold calculation
@@ -375,6 +378,9 @@ class GrooveIQ(nn.Module):
 
         if threshold is None:
             threshold = self.threshold
+
+        if temperature is None:
+            temperature = self.temperature
 
         generated = self.sos_token.unsqueeze(0).repeat(B, 1, 1, 1) # (B, 1, E, M)
         hit_probs = []
@@ -414,11 +420,11 @@ class GrooveIQ(nn.Module):
             # Predict
             pred_step = output[:, -1, :, :]          # (B, E, M)
             h_logits = pred_step[:, :, 0]            # (B, E)
-            h_prob = torch.sigmoid(h_logits)
+            h_prob = torch.sigmoid(h_logits / torch.as_tensor(temperature, device=h_logits.device, dtype=h_logits.dtype))
             hit_probs.append(h_prob)
 
             # Predict
-            h_pred = (h_prob > threshold).int() # (B, E)
+            h_pred = (h_prob > torch.as_tensor(threshold, device=h_prob.device, dtype=h_prob.dtype)).int() # (B, E)
             v_pred = ((torch.tanh(pred_step[:, :, 1]) + 1.0) / 2.0) * h_pred 
             o_pred = torch.tanh(pred_step[:, :, 2]) * 0.5 * h_pred    
             hvo_pred  = torch.stack([h_pred, v_pred, o_pred], dim=-1) # (B, E, 3)
