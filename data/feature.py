@@ -664,6 +664,130 @@ class DrumMIDIFeature:
                     random.uniform(-timing_jitter, timing_jitter)
                 ], device=grid.device)
         return button_hvo
+    
+    @staticmethod
+    def simplify_to_button_hvo_batch(
+        grid: torch.Tensor, 
+        num_buttons: int = 3, 
+        win_sizes: List[tuple] = [(1, 0.1), (2, 0.5), (3, 0.15), (4, 0.25)], 
+        velocity_range: tuple[float, float] = (0.5, 0.8), 
+        max_hits_per_win: int = 1,
+        win_retain_prob: float = 0.8,
+        miss_prob: float = 0.05, 
+    ) -> torch.Tensor:
+        """
+        Simplify a batch of grids to a button HVO. Vectorized version.
+        Args:
+            grid: Tensor of shape (B, T, E, M)
+            num_buttons: Number of buttons
+            win_sizes: List of tuples of (window size, probability)
+            velocity_range: Tuple of (minimum velocity, maximum velocity)
+            max_hits_per_win: Maximum number of hits per window
+            win_retain_prob: Probability of retaining a window
+            miss_prob: Probability of missing a hit
+        Returns:
+            button_hvo: Tensor of shape (B, T, num_buttons, M)
+        """
+        # Mapping for buttons
+        button_map = {
+            0: [0, 1],       # low
+            1: [2, 3, 4],    # mid
+            2: [5, 6, 7, 8], # high
+        }
+
+        device, dtype = grid.device, grid.dtype
+        if grid.dim() == 3:
+            grid = grid.unsqueeze(0)
+        B, T, E, M = grid.shape
+        assert M == 3
+
+        # instrument -> button LUT
+        inst2btn = torch.full((E,), -1, device=device, dtype=torch.long)
+        for b, insts in enumerate(button_map):
+            inst2btn[torch.as_tensor(insts, device=device)] = b
+
+        # window size (single sample per call)
+        sizes = torch.tensor([s for s,_ in win_sizes], device=device)
+        probs = torch.tensor([p for _,p in win_sizes], device=device, dtype=torch.float)
+        win_size = int(sizes[torch.multinomial(probs / probs.sum(), 1).item()].item())
+        win_size = max(win_size, 1)
+
+        nwin = T // win_size
+        if nwin == 0:
+            return torch.zeros((B, T, num_buttons, 3), device=device, dtype=dtype)
+
+        T_used = nwin * win_size
+        g = grid[:, :T_used]                         # (B,T_used,E,3)
+        H, V, O = g[..., 0], g[..., 1], g[..., 2]    # (B,T_used,E)
+
+        # velocity threshold (per sequence) with single multiplier for the call
+        v_max = torch.amax(V, dim=(1,2)).clamp_min(1e-8)     # (B,)
+        thr_mult = torch.empty((), device=device).uniform_(*velocity_range).item()
+        v_thr = v_max * thr_mult                              # (B,)
+
+        # reshape into windows
+        wV = V.view(B, nwin, win_size, E)
+
+        keep_win = (torch.rand((B, nwin), device=device) < win_retain_prob)  # bool mask
+        valid = wV > v_thr.view(B, 1, 1, 1)
+
+        # top-k among valid within each window
+        K = max(1, int(max_hits_per_win))
+        v_masked = wV.masked_fill(~valid, float("-inf"))
+        topv, topix = torch.topk(v_masked.view(B, nwin, win_size * E), k=K, dim=-1)
+        good = torch.isfinite(topv)
+
+        # random k per window in [1..K]
+        k_win = torch.randint(1, K + 1, (B, nwin), device=device)
+        ranks = torch.arange(K, device=device).view(1, 1, K)
+        select = keep_win.unsqueeze(-1) & good & (ranks < k_win.unsqueeze(-1))   # (B,nwin,K)
+
+        if not select.any():
+            return torch.zeros((B, T, num_buttons, 3), device=device, dtype=dtype)
+
+        # decode (t_rel, e) and map to buttons
+        t_rel = topix // E
+        e_idx = topix % E
+        b_idx = inst2btn[e_idx]
+        btn_ok = (b_idx >= 0) & (b_idx < num_buttons)
+        select = select & btn_ok
+
+        # absolute time for each window/rank
+        win_start = (torch.arange(nwin, device=device) * win_size).view(1, nwin, 1)
+        t_abs = (win_start + t_rel).clamp_max(T_used - 1)
+
+        # gather original HVO (no jitter)
+        B_ar = torch.arange(B, device=device).view(B, 1, 1).expand_as(select)
+        H_sel = H[B_ar, t_abs, e_idx]
+        V_sel = V[B_ar, t_abs, e_idx]
+        O_sel = O[B_ar, t_abs, e_idx]
+
+        # miss/drop
+        keep_hit = (torch.rand_like(V_sel) >= miss_prob)
+        select = select & keep_hit
+
+        bi, wi, ri = torch.where(select)
+        if bi.numel() == 0:
+            return torch.zeros((B, T, num_buttons, 3), device=device, dtype=dtype)
+
+        # compact candidate list
+        t_lin = t_abs[bi, wi, ri]
+        btn   = b_idx[bi, wi, ri]
+        Hc    = H_sel[bi, wi, ri]
+        Vc    = V_sel[bi, wi, ri]
+        Oc    = O_sel[bi, wi, ri]
+
+        # strongest-wins in one pass: sort by V ascending, last write keeps max-V
+        order = torch.argsort(Vc)
+        bi_s  = bi[order];  t_s = t_lin[order];  b_s = btn[order]
+        Hs    = Hc[order];  Vs  = Vc[order];     Os  = Oc[order]
+
+        out = torch.zeros((B, T, num_buttons, 3), device=device, dtype=dtype)
+        out[bi_s, t_s, b_s, 0] = Hs
+        out[bi_s, t_s, b_s, 1] = Vs
+        out[bi_s, t_s, b_s, 2] = Os
+
+        return out
 
     
     #########################################################################################
